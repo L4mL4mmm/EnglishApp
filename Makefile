@@ -15,8 +15,12 @@
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -pthread -O2
 
+# Flags for GTK (GUI)
+GTK_CFLAGS := $(shell pkg-config --cflags gtk+-3.0 2>/dev/null)
+GTK_LIBS := $(shell pkg-config --libs gtk+-3.0 2>/dev/null)
+
 # Targets
-all: server client
+all: server client gui
 
 server: server.cpp
 	$(CXX) $(CXXFLAGS) -o server server.cpp
@@ -26,8 +30,12 @@ client: client.cpp
 	$(CXX) $(CXXFLAGS) -o client client.cpp
 	@echo "Client compiled successfully!"
 
+gui: gui_main.cpp client.cpp
+	$(CXX) $(CXXFLAGS) -DCLIENT_SKIP_MAIN gui_main.cpp client.cpp -o gui_app $(GTK_CFLAGS) $(GTK_LIBS)
+	@echo "GUI App compiled successfully! Run with: ./gui_app"
+
 clean:
-	rm -f server client server.log
+	rm -f server client gui_app server.log
 	@echo "Cleaned!"
 
 run-server: server
@@ -36,4 +44,7 @@ run-server: server
 run-client: client
 	./client 127.0.0.1 8888
 
-.PHONY: all clean run-server run-client
+run-gui: gui
+	./gui_app
+
+.PHONY: all clean run-server run-client run-gui

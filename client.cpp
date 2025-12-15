@@ -528,8 +528,10 @@ void showMainMenu() {
     printColored("║  1. Set English Level                    ║\n", "");
     printColored("║  2. View All Lessons                     ║\n", "");
     printColored("║  3. Take a Test                          ║\n", "");
-    printColored("║  4. Chat with Others                     ║\n", "");
-    printColored("║  5. Logout                               ║\n", "");
+    printColored("║  4. Do Exercises                         ║\n", "");
+    printColored("║  5. Play Games                            ║\n", "");
+    printColored("║  6. Chat with Others                     ║\n", "");
+    printColored("║  7. Logout                               ║\n", "");
     printColored("║  0. Exit                                 ║\n", "");
     printColored("╚══════════════════════════════════════════╝\n", "cyan");
 
@@ -919,6 +921,16 @@ void takeTest() {
             }
 
             printColored("\nYour answer (a/b/c/d): ", "green");
+        } else if (type == "sentence_order") {
+            std::string wordsArray = getJsonArray(q, "words");
+            std::vector<std::string> words = parseJsonArray(wordsArray);
+            
+            printColored("Words (in random order):\n", "magenta");
+            for (size_t j = 0; j < words.size(); j++) {
+                printColored("  " + std::to_string(j + 1) + ") " + words[j] + "\n", "");
+            }
+            printColored("\nType the sentence in correct order (separate words with spaces):\n", "yellow");
+            printColored("Your answer: ", "green");
         } else {
             printColored("Type your answer: ", "green");
         }
@@ -1010,6 +1022,207 @@ void takeTest() {
         printColored("Q" + std::to_string(i + 1) + " " + icon + " ", color);
         printColored("Your: \"" + userAnswer + "\" | Correct: \"" + correctAnswer + "\"\n", "");
     }
+
+    waitEnter();
+}
+
+// ============================================================================
+// DO EXERCISES
+// ============================================================================
+
+void doExercises() {
+    clearScreen();
+    printColored("╔══════════════════════════════════════════╗\n", "cyan");
+    printColored("║              DO EXERCISES                ║\n", "cyan");
+    printColored("╚══════════════════════════════════════════╝\n", "cyan");
+
+    printColored("Exercise Types:\n", "yellow");
+    printColored("  1. Sentence Rewrite (grammar practice)\n", "green");
+    printColored("  2. Paragraph Writing (writing practice)\n", "green");
+    printColored("  3. Topic Speaking (speaking practice)\n", "green");
+    printColored("  0. Back to main menu\n\n", "");
+    printColored("Your current level: ", "");
+    printColored(currentLevel + "\n\n", "yellow");
+    printColored("Select exercise type (1/2/3/0): ", "green");
+
+    std::string typeChoice;
+    std::getline(std::cin, typeChoice);
+
+    std::string exerciseType;
+    if (typeChoice == "1") {
+        exerciseType = "sentence_rewrite";
+    } else if (typeChoice == "2") {
+        exerciseType = "paragraph_writing";
+    } else if (typeChoice == "3") {
+        exerciseType = "topic_speaking";
+    } else {
+        return;
+    }
+
+    // Get exercise
+    std::string request = R"({"messageType":"GET_EXERCISE_REQUEST","messageId":")" + generateMessageId() +
+                          R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                          R"(,"sessionToken":")" + sessionToken +
+                          R"(","payload":{"exerciseType":")" + exerciseType +
+                          R"(","level":")" + currentLevel + R"(","topic":""}})";
+
+    std::string response = sendAndReceive(request);
+    std::string status = getJsonValue(response, "status");
+
+    if (status != "success") {
+        std::string message = getJsonValue(response, "message");
+        printColored("\n[ERROR] " + message + "\n", "red");
+        waitEnter();
+        return;
+    }
+
+    std::string data = getJsonObject(response, "data");
+    std::string exerciseId = getJsonValue(data, "exerciseId");
+    std::string title = getJsonValue(data, "title");
+    std::string instructions = getJsonValue(data, "instructions");
+    std::string duration = getJsonValue(data, "duration");
+
+    clearScreen();
+    printColored("╔══════════════════════════════════════════╗\n", "cyan");
+    printColored("║  ", "cyan");
+    printColored(title, "yellow");
+    printColored("\n", "");
+    printColored("╠══════════════════════════════════════════╣\n", "cyan");
+    printColored("║  Duration: ", "cyan");
+    printColored(duration + " minutes", "green");
+    printColored("\n", "");
+    printColored("╚══════════════════════════════════════════╝\n\n", "cyan");
+
+    printColored("Instructions:\n", "yellow");
+    std::string inst = unescapeJson(instructions);
+    std::cout << inst << "\n\n";
+
+    std::string content = "";
+
+    if (exerciseType == "sentence_rewrite") {
+        std::string promptsArray = getJsonArray(data, "prompts");
+        std::vector<std::string> prompts = parseJsonArray(promptsArray);
+
+        printColored("────────────────────────────────────────────\n", "cyan");
+        printColored("Sentences to rewrite:\n\n", "magenta");
+
+        for (size_t i = 0; i < prompts.size(); i++) {
+            printColored(std::to_string(i + 1) + ". " + prompts[i] + "\n", "");
+        }
+
+        printColored("\n────────────────────────────────────────────\n", "cyan");
+        printColored("Type your rewritten sentences (one per line, press Enter twice when done):\n", "yellow");
+        printColored("(You can write all sentences together)\n\n", "");
+
+        std::string line;
+        std::vector<std::string> rewrittenSentences;
+        while (std::getline(std::cin, line)) {
+            if (line.empty() && !rewrittenSentences.empty()) break;
+            if (!line.empty()) {
+                rewrittenSentences.push_back(line);
+            }
+        }
+
+        for (size_t i = 0; i < rewrittenSentences.size(); i++) {
+            if (i > 0) content += "\n";
+            content += rewrittenSentences[i];
+        }
+    } else if (exerciseType == "paragraph_writing") {
+        std::string topicDesc = getJsonValue(data, "topicDescription");
+        std::string requirementsArray = getJsonArray(data, "requirements");
+        std::vector<std::string> requirements = parseJsonArray(requirementsArray);
+
+        printColored("Topic:\n", "magenta");
+        printColored(unescapeJson(topicDesc) + "\n\n", "");
+
+        if (!requirements.empty()) {
+            printColored("Requirements:\n", "magenta");
+            for (const std::string& req : requirements) {
+                printColored("  • " + unescapeJson(req) + "\n", "");
+            }
+            printColored("\n", "");
+        }
+
+        printColored("────────────────────────────────────────────\n", "cyan");
+        printColored("Write your paragraph below (press Enter twice when done):\n", "yellow");
+
+        std::string line;
+        std::vector<std::string> lines;
+        while (std::getline(std::cin, line)) {
+            if (line.empty() && !lines.empty()) break;
+            if (!line.empty()) {
+                lines.push_back(line);
+            }
+        }
+
+        for (size_t i = 0; i < lines.size(); i++) {
+            if (i > 0) content += "\n";
+            content += lines[i];
+        }
+    } else if (exerciseType == "topic_speaking") {
+        std::string topicDesc = getJsonValue(data, "topicDescription");
+
+        printColored("Topic:\n", "magenta");
+        printColored(unescapeJson(topicDesc) + "\n\n", "");
+
+        printColored("────────────────────────────────────────────\n", "cyan");
+        printColored("Note: In a real application, you would record audio here.\n", "yellow");
+        printColored("For now, please type a summary of what you would say:\n\n", "yellow");
+
+        std::string line;
+        std::vector<std::string> lines;
+        while (std::getline(std::cin, line)) {
+            if (line.empty() && !lines.empty()) break;
+            if (!line.empty()) {
+                lines.push_back(line);
+            }
+        }
+
+        for (size_t i = 0; i < lines.size(); i++) {
+            if (i > 0) content += "\n";
+            content += lines[i];
+        }
+    }
+
+    if (content.empty()) {
+        printColored("\n[ERROR] No content submitted.\n", "red");
+        waitEnter();
+        return;
+    }
+
+    // Submit exercise
+    printColored("\n────────────────────────────────────────────\n", "cyan");
+    printColored("Submitting your exercise...\n", "yellow");
+
+    std::string submitRequest = R"({"messageType":"SUBMIT_EXERCISE_REQUEST","messageId":")" + generateMessageId() +
+                                R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                                R"(,"sessionToken":")" + sessionToken +
+                                R"(","payload":{"exerciseId":")" + exerciseId +
+                                R"(","exerciseType":")" + exerciseType +
+                                R"(","content":")" + escapeJson(content) + R"("}})";
+
+    std::string submitResponse = sendAndReceive(submitRequest);
+    std::string submitStatus = getJsonValue(submitResponse, "status");
+
+    if (submitStatus != "success") {
+        std::string message = getJsonValue(submitResponse, "message");
+        printColored("\n[ERROR] " + message + "\n", "red");
+        waitEnter();
+        return;
+    }
+
+    std::string submitData = getJsonObject(submitResponse, "data");
+    std::string message = getJsonValue(submitResponse, "message");
+    std::string submitMessage = getJsonValue(submitData, "message");
+
+    clearScreen();
+    printColored("╔══════════════════════════════════════════╗\n", "cyan");
+    printColored("║         EXERCISE SUBMITTED                ║\n", "cyan");
+    printColored("╚══════════════════════════════════════════╝\n\n", "cyan");
+
+    printColored("[SUCCESS] " + message + "\n", "green");
+    printColored(submitMessage + "\n", "yellow");
+    printColored("\nA teacher will review your submission and provide feedback.\n", "");
 
     waitEnter();
 }
@@ -1141,6 +1354,355 @@ void openChatWith(const std::string& recipientId, const std::string& recipientNa
     inChatMode = false;
 }
 
+// ============================================================================
+// PLAY GAMES
+// ============================================================================
+
+void playGames() {
+    clearScreen();
+    printColored("╔══════════════════════════════════════════╗\n", "cyan");
+    printColored("║              PLAY GAMES                  ║\n", "cyan");
+    printColored("╚══════════════════════════════════════════╝\n", "cyan");
+
+    // Get game list
+    std::string request = R"({"messageType":"GET_GAME_LIST_REQUEST","messageId":")" + generateMessageId() +
+                          R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                          R"(,"sessionToken":")" + sessionToken +
+                          R"(","payload":{"gameType":"all","level":")" + currentLevel + R"("}})";
+
+    std::string response = sendAndReceive(request);
+    std::string status = getJsonValue(response, "status");
+
+    if (status != "success") {
+        std::string message = getJsonValue(response, "message");
+        printColored("\n[ERROR] " + message + "\n", "red");
+        waitEnter();
+        return;
+    }
+
+    std::string data = getJsonObject(response, "data");
+    std::string gamesArray = getJsonArray(data, "games");
+    std::vector<std::string> gamesList = parseJsonArray(gamesArray);
+
+    if (gamesList.empty()) {
+        printColored("\n[INFO] No games available for your level.\n", "yellow");
+        waitEnter();
+        return;
+    }
+
+    printColored("\nAvailable Games:\n", "yellow");
+    printColored("┌────┬────────────────────────┬──────────────┬──────────┐\n", "cyan");
+    printColored("│ #  │ Game Title              │ Type         │ Level    │\n", "cyan");
+    printColored("├────┼────────────────────────┼──────────────┼──────────┤\n", "cyan");
+
+    int idx = 1;
+    std::vector<std::string> gameIds;
+
+    for (const std::string& game : gamesList) {
+        std::string gameId = getJsonValue(game, "gameId");
+        std::string title = getJsonValue(game, "title");
+        std::string gameType = getJsonValue(game, "gameType");
+        std::string level = getJsonValue(game, "level");
+
+        gameIds.push_back(gameId);
+
+        std::string typeDisplay = gameType;
+        if (gameType == "word_match") typeDisplay = "Word Match";
+        else if (gameType == "sentence_match") typeDisplay = "Sentence Match";
+        else if (gameType == "picture_match") typeDisplay = "Picture Match";
+
+        if (title.length() > 22) title = title.substr(0, 19) + "...";
+
+        printf("│ %-2d │ %-22s │ %-12s │ %-8s │\n",
+               idx, title.c_str(), typeDisplay.c_str(), level.c_str());
+        idx++;
+    }
+
+    printColored("└────┴────────────────────────┴──────────────┴──────────┘\n", "cyan");
+
+    printColored("\nEnter game number to play (0 to go back): ", "green");
+
+    std::string input;
+    std::getline(std::cin, input);
+
+    int choice;
+    try {
+        choice = std::stoi(input);
+    } catch (...) {
+        return;
+    }
+
+    if (choice <= 0 || choice > (int)gameIds.size()) {
+        return;
+    }
+
+    std::string selectedGameId = gameIds[choice - 1];
+
+    // Start game
+    std::string startRequest = R"({"messageType":"START_GAME_REQUEST","messageId":")" + generateMessageId() +
+                                R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                                R"(,"sessionToken":")" + sessionToken +
+                                R"(","payload":{"gameId":")" + selectedGameId + R"("}})";
+
+    std::string startResponse = sendAndReceive(startRequest);
+    std::string startStatus = getJsonValue(startResponse, "status");
+
+    if (startStatus != "success") {
+        std::string message = getJsonValue(startResponse, "message");
+        printColored("\n[ERROR] " + message + "\n", "red");
+        waitEnter();
+        return;
+    }
+
+    std::string gameData = getJsonObject(startResponse, "data");
+    std::string gameSessionId = getJsonValue(gameData, "gameSessionId");
+    std::string gameType = getJsonValue(gameData, "gameType");
+    std::string title = getJsonValue(gameData, "title");
+    std::string timeLimit = getJsonValue(gameData, "timeLimit");
+    std::string pairsArray = getJsonArray(gameData, "pairs");
+
+    clearScreen();
+    printColored("╔══════════════════════════════════════════╗\n", "cyan");
+    printColored("║  ", "cyan");
+    printColored(title, "yellow");
+    printColored("\n", "");
+    printColored("╠══════════════════════════════════════════╣\n", "cyan");
+    printColored("║  Time Limit: ", "cyan");
+    printColored(timeLimit + " seconds", "green");
+    printColored("\n", "");
+    printColored("╚══════════════════════════════════════════╝\n\n", "cyan");
+
+    // Display pairs and get matches
+    std::vector<std::string> pairs = parseJsonArray(pairsArray);
+    
+    if (gameType == "word_match") {
+        printColored("Match English words with Vietnamese meanings:\n\n", "yellow");
+        
+        std::vector<std::string> leftItems, rightItems;
+        for (const std::string& pair : pairs) {
+            leftItems.push_back(getJsonValue(pair, "left"));
+            rightItems.push_back(getJsonValue(pair, "right"));
+        }
+
+        printColored("Left Column (English):\n", "magenta");
+        for (size_t i = 0; i < leftItems.size(); i++) {
+            printColored("  " + std::to_string(i + 1) + ". " + leftItems[i] + "\n", "");
+        }
+
+        printColored("\nRight Column (Vietnamese):\n", "magenta");
+        for (size_t i = 0; i < rightItems.size(); i++) {
+            printColored("  " + std::to_string(i + 1) + ". " + rightItems[i] + "\n", "");
+        }
+
+        printColored("\nEnter matches (format: left1-right1,left2-right2,...):\n", "yellow");
+        printColored("Example: 1-3,2-1,3-5 means: English1-Vietnamese3, English2-Vietnamese1, etc.\n", "cyan");
+        printColored("Your matches: ", "green");
+
+        std::string matchesInput;
+        std::getline(std::cin, matchesInput);
+
+        // Parse matches
+        std::stringstream matchesJson;
+        matchesJson << "[";
+        std::istringstream iss(matchesInput);
+        std::string match;
+        bool first = true;
+        while (std::getline(iss, match, ',')) {
+            size_t dashPos = match.find('-');
+            if (dashPos != std::string::npos) {
+                int leftIdx = std::stoi(match.substr(0, dashPos)) - 1;
+                int rightIdx = std::stoi(match.substr(dashPos + 1)) - 1;
+                if (leftIdx >= 0 && leftIdx < (int)leftItems.size() &&
+                    rightIdx >= 0 && rightIdx < (int)rightItems.size()) {
+                    if (!first) matchesJson << ",";
+                    first = false;
+                    matchesJson << R"({"left":")" << escapeJson(leftItems[leftIdx])
+                                << R"(","right":")" << escapeJson(rightItems[rightIdx]) << R"("})";
+                }
+            }
+        }
+        matchesJson << "]";
+
+        // Submit result
+        std::string submitRequest = R"({"messageType":"SUBMIT_GAME_RESULT_REQUEST","messageId":")" + generateMessageId() +
+                                    R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                                    R"(,"sessionToken":")" + sessionToken +
+                                    R"(","payload":{"gameSessionId":")" + gameSessionId +
+                                    R"(","gameId":")" + selectedGameId +
+                                    R"(","matches":)" + matchesJson.str() + R"(}})";
+
+        std::string submitResponse = sendAndReceive(submitRequest);
+        std::string submitStatus = getJsonValue(submitResponse, "status");
+
+        if (submitStatus == "success") {
+            std::string resultData = getJsonObject(submitResponse, "data");
+            std::string score = getJsonValue(resultData, "score");
+            std::string maxScore = getJsonValue(resultData, "maxScore");
+            std::string percentage = getJsonValue(resultData, "percentage");
+            std::string grade = getJsonValue(resultData, "grade");
+            std::string correctMatches = getJsonValue(resultData, "correctMatches");
+            std::string totalPairs = getJsonValue(resultData, "totalPairs");
+
+            clearScreen();
+            printColored("╔══════════════════════════════════════════╗\n", "cyan");
+            printColored("║            GAME RESULTS                  ║\n", "cyan");
+            printColored("╚══════════════════════════════════════════╝\n\n", "cyan");
+
+            printColored("Score: " + score + "/" + maxScore + " points\n", "green");
+            printColored("Percentage: " + percentage + "%\n", "yellow");
+            printColored("Grade: " + grade + "\n", (grade == "A" || grade == "B") ? "green" : "yellow");
+            printColored("Correct Matches: " + correctMatches + "/" + totalPairs + "\n", "");
+
+            if (percentage == "100") {
+                printColored("\n    ★★★ PERFECT SCORE! ★★★\n", "green");
+            }
+        } else {
+            std::string message = getJsonValue(submitResponse, "message");
+            printColored("\n[ERROR] " + message + "\n", "red");
+        }
+    } else if (gameType == "sentence_match") {
+        printColored("Match questions with answers:\n\n", "yellow");
+        
+        std::vector<std::string> leftItems, rightItems;
+        for (const std::string& pair : pairs) {
+            leftItems.push_back(getJsonValue(pair, "left"));
+            rightItems.push_back(getJsonValue(pair, "right"));
+        }
+
+        printColored("Questions:\n", "magenta");
+        for (size_t i = 0; i < leftItems.size(); i++) {
+            printColored("  " + std::to_string(i + 1) + ". " + leftItems[i] + "\n", "");
+        }
+
+        printColored("\nAnswers:\n", "magenta");
+        for (size_t i = 0; i < rightItems.size(); i++) {
+            printColored("  " + std::to_string(i + 1) + ". " + rightItems[i] + "\n", "");
+        }
+
+        printColored("\nEnter matches (format: q1-a2,q2-a1,...): ", "green");
+        std::string matchesInput;
+        std::getline(std::cin, matchesInput);
+
+        // Parse matches
+        std::stringstream matchesJson;
+        matchesJson << "[";
+        std::istringstream iss(matchesInput);
+        std::string match;
+        bool first = true;
+        while (std::getline(iss, match, ',')) {
+            size_t dashPos = match.find('-');
+            if (dashPos != std::string::npos) {
+                int leftIdx = std::stoi(match.substr(0, dashPos)) - 1;
+                int rightIdx = std::stoi(match.substr(dashPos + 1)) - 1;
+                if (leftIdx >= 0 && leftIdx < (int)leftItems.size() &&
+                    rightIdx >= 0 && rightIdx < (int)rightItems.size()) {
+                    if (!first) matchesJson << ",";
+                    first = false;
+                    matchesJson << R"({"left":")" << escapeJson(leftItems[leftIdx])
+                                << R"(","right":")" << escapeJson(rightItems[rightIdx]) << R"("})";
+                }
+            }
+        }
+        matchesJson << "]";
+
+        std::string submitRequest = R"({"messageType":"SUBMIT_GAME_RESULT_REQUEST","messageId":")" + generateMessageId() +
+                                    R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                                    R"(,"sessionToken":")" + sessionToken +
+                                    R"(","payload":{"gameSessionId":")" + gameSessionId +
+                                    R"(","gameId":")" + selectedGameId +
+                                    R"(","matches":)" + matchesJson.str() + R"(}})";
+
+        std::string submitResponse = sendAndReceive(submitRequest);
+        std::string submitStatus = getJsonValue(submitResponse, "status");
+
+        if (submitStatus == "success") {
+            std::string resultData = getJsonObject(submitResponse, "data");
+            std::string score = getJsonValue(resultData, "score");
+            std::string maxScore = getJsonValue(resultData, "maxScore");
+            std::string percentage = getJsonValue(resultData, "percentage");
+            std::string grade = getJsonValue(resultData, "grade");
+
+            clearScreen();
+            printColored("╔══════════════════════════════════════════╗\n", "cyan");
+            printColored("║            GAME RESULTS                  ║\n", "cyan");
+            printColored("╚══════════════════════════════════════════╝\n\n", "cyan");
+
+            printColored("Score: " + score + "/" + maxScore + " points\n", "green");
+            printColored("Percentage: " + percentage + "%\n", "yellow");
+            printColored("Grade: " + grade + "\n", (grade == "A" || grade == "B") ? "green" : "yellow");
+        }
+    } else if (gameType == "picture_match") {
+        printColored("Match words with pictures:\n\n", "yellow");
+        printColored("(Note: In a real app, images would be displayed here)\n\n", "magenta");
+        
+        std::vector<std::string> words, imageUrls;
+        for (const std::string& pair : pairs) {
+            words.push_back(getJsonValue(pair, "word"));
+            imageUrls.push_back(getJsonValue(pair, "imageUrl"));
+        }
+
+        printColored("Words:\n", "magenta");
+        for (size_t i = 0; i < words.size(); i++) {
+            printColored("  " + std::to_string(i + 1) + ". " + words[i] + " (Image: " + imageUrls[i] + ")\n", "");
+        }
+
+        printColored("\nEnter matches (format: word1-img1,word2-img2,...): ", "green");
+        std::string matchesInput;
+        std::getline(std::cin, matchesInput);
+
+        // Parse matches
+        std::stringstream matchesJson;
+        matchesJson << "[";
+        std::istringstream iss(matchesInput);
+        std::string match;
+        bool first = true;
+        while (std::getline(iss, match, ',')) {
+            size_t dashPos = match.find('-');
+            if (dashPos != std::string::npos) {
+                int wordIdx = std::stoi(match.substr(0, dashPos)) - 1;
+                int imgIdx = std::stoi(match.substr(dashPos + 1)) - 1;
+                if (wordIdx >= 0 && wordIdx < (int)words.size() &&
+                    imgIdx >= 0 && imgIdx < (int)imageUrls.size()) {
+                    if (!first) matchesJson << ",";
+                    first = false;
+                    matchesJson << R"({"word":")" << escapeJson(words[wordIdx])
+                                << R"(","imageUrl":")" << escapeJson(imageUrls[imgIdx]) << R"("})";
+                }
+            }
+        }
+        matchesJson << "]";
+
+        std::string submitRequest = R"({"messageType":"SUBMIT_GAME_RESULT_REQUEST","messageId":")" + generateMessageId() +
+                                    R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                                    R"(,"sessionToken":")" + sessionToken +
+                                    R"(","payload":{"gameSessionId":")" + gameSessionId +
+                                    R"(","gameId":")" + selectedGameId +
+                                    R"(","matches":)" + matchesJson.str() + R"(}})";
+
+        std::string submitResponse = sendAndReceive(submitRequest);
+        std::string submitStatus = getJsonValue(submitResponse, "status");
+
+        if (submitStatus == "success") {
+            std::string resultData = getJsonObject(submitResponse, "data");
+            std::string score = getJsonValue(resultData, "score");
+            std::string maxScore = getJsonValue(resultData, "maxScore");
+            std::string percentage = getJsonValue(resultData, "percentage");
+            std::string grade = getJsonValue(resultData, "grade");
+
+            clearScreen();
+            printColored("╔══════════════════════════════════════════╗\n", "cyan");
+            printColored("║            GAME RESULTS                  ║\n", "cyan");
+            printColored("╚══════════════════════════════════════════╝\n\n", "cyan");
+
+            printColored("Score: " + score + "/" + maxScore + " points\n", "green");
+            printColored("Percentage: " + percentage + "%\n", "yellow");
+            printColored("Grade: " + grade + "\n", (grade == "A" || grade == "B") ? "green" : "yellow");
+        }
+    }
+
+    waitEnter();
+}
+
 void chat() {
     clearScreen();
     printColored("╔══════════════════════════════════════════╗\n", "cyan");
@@ -1260,7 +1822,7 @@ void signalHandler(int sig) {
     exit(0);
 }
 
-int main(int argc, char* argv[]) {
+int main_cli(int argc, char* argv[]) {
     std::string serverIP = DEFAULT_SERVER;
     int port = DEFAULT_PORT;
 
@@ -1355,8 +1917,12 @@ int main(int argc, char* argv[]) {
         } else if (input == "3") {
             takeTest();
         } else if (input == "4") {
-            chat();
+            doExercises();
         } else if (input == "5") {
+            playGames();
+        } else if (input == "6") {
+            chat();
+        } else if (input == "7") {
             loggedIn = false;
             sessionToken = "";
             currentUserId = "";
@@ -1396,3 +1962,42 @@ int main(int argc, char* argv[]) {
     close(clientSocket);
     return 0;
 }
+// --- DÁN ĐOẠN NÀY VÀO CLIENT.CPP ---
+bool connectToServer(const char* ip, int port) {
+    // Tạo socket
+    clientSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (clientSocket < 0) {
+        std::cerr << "[ERROR] Cannot create socket" << std::endl;
+        return false;
+    }
+
+    // Cấu hình địa chỉ
+    struct sockaddr_in serverAddr;
+    memset(&serverAddr, 0, sizeof(serverAddr));
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, ip, &serverAddr.sin_addr) <= 0) {
+        std::cerr << "[ERROR] Invalid server address" << std::endl;
+        close(clientSocket);
+        return false;
+    }
+
+    // Kết nối
+    std::cout << "Connecting to " << ip << ":" << port << "..." << std::endl;
+    if (connect(clientSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        std::cerr << "[ERROR] Cannot connect to server" << std::endl;
+        close(clientSocket);
+        return false;
+    }
+
+    std::cout << "[SUCCESS] Connected!" << std::endl;
+    return true;
+}
+
+// Entry point wrapper so linker finds main (skipped when embedded in GUI build)
+#ifndef CLIENT_SKIP_MAIN
+int main(int argc, char* argv[]) {
+    return main_cli(argc, argv);
+}
+#endif
