@@ -58,6 +58,16 @@ enum class GameType {
     PictureMatch
 };
 
+// Voice call status
+enum class VoiceCallStatus {
+    Pending,    // Call initiated, waiting for recipient
+    Active,     // Call accepted, in progress
+    Rejected,   // Call rejected by recipient
+    Ended,      // Call ended normally
+    Missed,     // Call not answered (timeout)
+    Failed      // Call failed (technical error)
+};
+
 // Helper functions for string conversion
 inline std::string levelToString(Level level) {
     switch (level) {
@@ -166,6 +176,27 @@ inline std::string submissionStatusToString(SubmissionStatus status) {
 inline SubmissionStatus stringToSubmissionStatus(const std::string& str) {
     if (str == "reviewed") return SubmissionStatus::Reviewed;
     return SubmissionStatus::Pending;
+}
+
+inline std::string voiceCallStatusToString(VoiceCallStatus status) {
+    switch (status) {
+        case VoiceCallStatus::Pending: return "pending";
+        case VoiceCallStatus::Active: return "active";
+        case VoiceCallStatus::Rejected: return "rejected";
+        case VoiceCallStatus::Ended: return "ended";
+        case VoiceCallStatus::Missed: return "missed";
+        case VoiceCallStatus::Failed: return "failed";
+    }
+    return "pending";
+}
+
+inline VoiceCallStatus stringToVoiceCallStatus(const std::string& str) {
+    if (str == "active") return VoiceCallStatus::Active;
+    if (str == "rejected") return VoiceCallStatus::Rejected;
+    if (str == "ended") return VoiceCallStatus::Ended;
+    if (str == "missed") return VoiceCallStatus::Missed;
+    if (str == "failed") return VoiceCallStatus::Failed;
+    return VoiceCallStatus::Pending;
 }
 
 // Timestamp type alias

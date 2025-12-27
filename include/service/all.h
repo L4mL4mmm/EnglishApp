@@ -12,5 +12,6 @@
 #include "i_chat_service.h"
 #include "i_exercise_service.h"
 #include "i_game_service.h"
+#include "i_voice_call_service.h"
 
 #endif // ENGLISH_LEARNING_SERVICE_ALL_H

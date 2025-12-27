@@ -25,7 +25,8 @@ GTK_LIBS := $(shell pkg-config --libs gtk+-3.0 2>/dev/null)
 # Core header dependencies
 CORE_HEADERS = include/core/types.h include/core/user.h include/core/session.h \
                include/core/lesson.h include/core/test.h include/core/chat_message.h \
-               include/core/exercise.h include/core/game.h include/core/all.h
+               include/core/exercise.h include/core/game.h include/core/voice_call.h \
+               include/core/all.h
 
 # Protocol header dependencies
 PROTOCOL_HEADERS = include/protocol/message_types.h include/protocol/json_parser.h \
@@ -39,7 +40,8 @@ PROTOCOL_SOURCES = src/protocol/json_parser.cpp
 REPOSITORY_HEADERS = include/repository/i_user_repository.h include/repository/i_session_repository.h \
                      include/repository/i_lesson_repository.h include/repository/i_test_repository.h \
                      include/repository/i_chat_repository.h include/repository/i_exercise_repository.h \
-                     include/repository/i_game_repository.h include/repository/all.h
+                     include/repository/i_game_repository.h include/repository/i_voice_call_repository.h \
+                     include/repository/all.h
 
 # Bridge repository headers (wrap global data for service layer)
 BRIDGE_HEADERS = src/repository/bridge/bridge_repositories.h src/repository/bridge/bridge_repositories_ext.h
@@ -53,12 +55,14 @@ REPOSITORY_SOURCES = src/repository/memory/memory_user_repository.cpp \
 SERVICE_HEADERS = include/service/service_result.h include/service/i_auth_service.h \
                   include/service/i_lesson_service.h include/service/i_test_service.h \
                   include/service/i_chat_service.h include/service/i_exercise_service.h \
-                  include/service/i_game_service.h include/service/all.h
+                  include/service/i_game_service.h include/service/i_voice_call_service.h \
+                  include/service/all.h
 
 # Service source files (implementations)
 SERVICE_SOURCES = src/service/auth_service.cpp src/service/lesson_service.cpp \
                   src/service/test_service.cpp src/service/chat_service.cpp \
-                  src/service/exercise_service.cpp src/service/game_service.cpp
+                  src/service/exercise_service.cpp src/service/game_service.cpp \
+                  src/service/voice_call_service.cpp
 
 # All headers
 ALL_HEADERS = $(CORE_HEADERS) $(PROTOCOL_HEADERS) $(REPOSITORY_HEADERS) $(BRIDGE_HEADERS) $(SERVICE_HEADERS)

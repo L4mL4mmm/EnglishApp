@@ -94,12 +94,17 @@ std::map<std::string, GameSession> gameSessions;  // sessionId -> GameSession
 std::vector<ChatMessage> chatMessages;          // Danh sách tin nhắn
 std::map<int, std::string> clientSessions;      // socket -> sessionToken
 
+// Voice Call type alias
+using VoiceCallSession = english_learning::core::VoiceCallSession;
+std::map<std::string, VoiceCallSession> voiceCalls;  // callId -> VoiceCallSession
+
 std::mutex usersMutex;
 std::mutex sessionsMutex;
 std::mutex chatMutex;
 std::mutex logMutex;
 std::mutex exercisesMutex;
 std::mutex gamesMutex;
+std::mutex voiceCallMutex;
 
 int serverSocket = -1;
 bool running = true;
@@ -2888,6 +2893,375 @@ std::string handleSetLevel(const std::string& json) {
 }
 
 // ============================================================================
+// VOICE CALL HANDLERS
+// ============================================================================
+
+// Helper: Send push notification to a user's socket
+void sendPushToUser(const std::string& userId, const std::string& message) {
+    std::lock_guard<std::mutex> userLock(usersMutex);
+    auto it = userById.find(userId);
+    if (it != userById.end() && it->second->online && it->second->clientSocket >= 0) {
+        int socket = it->second->clientSocket;
+        uint32_t len = htonl(message.length());
+        send(socket, &len, sizeof(len), 0);
+        send(socket, message.c_str(), message.length(), 0);
+    }
+}
+
+// Handle VOICE_CALL_INITIATE_REQUEST
+std::string handleVoiceCallInitiate(const std::string& json) {
+    std::string payload = getJsonObject(json, "payload");
+    std::string messageId = getJsonValue(json, "messageId");
+    std::string sessionToken = getJsonValue(json, "sessionToken");
+    std::string receiverId = getJsonValue(payload, "receiverId");
+    std::string audioSource = getJsonValue(payload, "audioSource");
+    if (audioSource.empty()) audioSource = "microphone";
+
+    std::string callerId = validateSession(sessionToken);
+    if (callerId.empty()) {
+        return R"({"messageType":"VOICE_CALL_INITIATE_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Invalid or expired session"}})";
+    }
+
+    // Check if receiver exists and is online
+    User* receiver = nullptr;
+    std::string callerName;
+    {
+        std::lock_guard<std::mutex> lock(usersMutex);
+        auto it = userById.find(receiverId);
+        if (it != userById.end()) {
+            receiver = it->second;
+        }
+        auto callerIt = userById.find(callerId);
+        if (callerIt != userById.end()) {
+            callerName = callerIt->second->fullname;
+        }
+    }
+
+    if (!receiver) {
+        return R"({"messageType":"VOICE_CALL_INITIATE_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Receiver not found"}})";
+    }
+
+    if (!receiver->online) {
+        return R"({"messageType":"VOICE_CALL_INITIATE_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Receiver is offline"}})";
+    }
+
+    // Check for existing active/pending calls
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        for (const auto& p : voiceCalls) {
+            if (p.second.involvesUser(callerId) &&
+                (p.second.isActive() || p.second.isPending())) {
+                return R"({"messageType":"VOICE_CALL_INITIATE_RESPONSE","messageId":")" + messageId +
+                       R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                       R"(,"payload":{"status":"error","message":"You are already in a call"}})";
+            }
+            if (p.second.involvesUser(receiverId) && p.second.isActive()) {
+                return R"({"messageType":"VOICE_CALL_INITIATE_RESPONSE","messageId":")" + messageId +
+                       R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                       R"(,"payload":{"status":"error","message":"Receiver is already in a call"}})";
+            }
+        }
+    }
+
+    // Create call session
+    VoiceCallSession call;
+    call.callId = generateId("call");
+    call.callerId = callerId;
+    call.receiverId = receiverId;
+    call.status = english_learning::core::VoiceCallStatus::Pending;
+    call.audioSource = audioSource;
+    call.startTime = getCurrentTimestamp();
+
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        voiceCalls[call.callId] = call;
+    }
+
+    // Send push notification to receiver
+    std::string incomingNotification = R"({"messageType":"VOICE_CALL_INCOMING","timestamp":)" +
+        std::to_string(getCurrentTimestamp()) +
+        R"(,"payload":{"callId":")" + call.callId +
+        R"(","callerId":")" + callerId +
+        R"(","callerName":")" + escapeJson(callerName) +
+        R"(","audioSource":")" + audioSource + R"("}})";
+    sendPushToUser(receiverId, incomingNotification);
+
+    return R"({"messageType":"VOICE_CALL_INITIATE_RESPONSE","messageId":")" + messageId +
+           R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+           R"(,"payload":{"status":"success","data":{"callId":")" + call.callId +
+           R"(","receiverId":")" + receiverId +
+           R"(","receiverName":")" + escapeJson(receiver->fullname) +
+           R"(","callStatus":"pending"}}})";
+}
+
+// Handle VOICE_CALL_ACCEPT_REQUEST
+std::string handleVoiceCallAccept(const std::string& json) {
+    std::string payload = getJsonObject(json, "payload");
+    std::string messageId = getJsonValue(json, "messageId");
+    std::string sessionToken = getJsonValue(json, "sessionToken");
+    std::string callId = getJsonValue(payload, "callId");
+
+    std::string userId = validateSession(sessionToken);
+    if (userId.empty()) {
+        return R"({"messageType":"VOICE_CALL_ACCEPT_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Invalid or expired session"}})";
+    }
+
+    VoiceCallSession* call = nullptr;
+    std::string callerName, receiverName;
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        auto it = voiceCalls.find(callId);
+        if (it != voiceCalls.end()) {
+            call = &it->second;
+        }
+    }
+
+    if (!call) {
+        return R"({"messageType":"VOICE_CALL_ACCEPT_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Call not found"}})";
+    }
+
+    if (call->receiverId != userId) {
+        return R"({"messageType":"VOICE_CALL_ACCEPT_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Only the receiver can accept the call"}})";
+    }
+
+    if (!call->isPending()) {
+        return R"({"messageType":"VOICE_CALL_ACCEPT_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Call is not pending"}})";
+    }
+
+    // Accept the call
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        call->accept(getCurrentTimestamp());
+    }
+
+    // Get names
+    {
+        std::lock_guard<std::mutex> lock(usersMutex);
+        auto callerIt = userById.find(call->callerId);
+        if (callerIt != userById.end()) callerName = callerIt->second->fullname;
+        auto receiverIt = userById.find(call->receiverId);
+        if (receiverIt != userById.end()) receiverName = receiverIt->second->fullname;
+    }
+
+    // Notify caller
+    std::string acceptNotification = R"({"messageType":"VOICE_CALL_ACCEPTED","timestamp":)" +
+        std::to_string(getCurrentTimestamp()) +
+        R"(,"payload":{"callId":")" + callId +
+        R"(","receiverId":")" + userId +
+        R"(","receiverName":")" + escapeJson(receiverName) + R"("}})";
+    sendPushToUser(call->callerId, acceptNotification);
+
+    return R"({"messageType":"VOICE_CALL_ACCEPT_RESPONSE","messageId":")" + messageId +
+           R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+           R"(,"payload":{"status":"success","data":{"callId":")" + callId +
+           R"(","callStatus":"active","callerId":")" + call->callerId +
+           R"(","callerName":")" + escapeJson(callerName) + R"("}}})";
+}
+
+// Handle VOICE_CALL_REJECT_REQUEST
+std::string handleVoiceCallReject(const std::string& json) {
+    std::string payload = getJsonObject(json, "payload");
+    std::string messageId = getJsonValue(json, "messageId");
+    std::string sessionToken = getJsonValue(json, "sessionToken");
+    std::string callId = getJsonValue(payload, "callId");
+
+    std::string userId = validateSession(sessionToken);
+    if (userId.empty()) {
+        return R"({"messageType":"VOICE_CALL_REJECT_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Invalid or expired session"}})";
+    }
+
+    VoiceCallSession* call = nullptr;
+    std::string callerName;
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        auto it = voiceCalls.find(callId);
+        if (it != voiceCalls.end()) {
+            call = &it->second;
+        }
+    }
+
+    if (!call) {
+        return R"({"messageType":"VOICE_CALL_REJECT_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Call not found"}})";
+    }
+
+    if (call->receiverId != userId) {
+        return R"({"messageType":"VOICE_CALL_REJECT_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Only the receiver can reject the call"}})";
+    }
+
+    if (!call->isPending()) {
+        return R"({"messageType":"VOICE_CALL_REJECT_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Call is not pending"}})";
+    }
+
+    // Reject the call
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        call->reject(getCurrentTimestamp());
+    }
+
+    // Get caller name
+    {
+        std::lock_guard<std::mutex> lock(usersMutex);
+        auto callerIt = userById.find(call->callerId);
+        if (callerIt != userById.end()) callerName = callerIt->second->fullname;
+    }
+
+    // Notify caller
+    std::string rejectNotification = R"({"messageType":"VOICE_CALL_REJECTED","timestamp":)" +
+        std::to_string(getCurrentTimestamp()) +
+        R"(,"payload":{"callId":")" + callId +
+        R"(","receiverId":")" + userId + R"("}})";
+    sendPushToUser(call->callerId, rejectNotification);
+
+    return R"({"messageType":"VOICE_CALL_REJECT_RESPONSE","messageId":")" + messageId +
+           R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+           R"(,"payload":{"status":"success","data":{"callId":")" + callId +
+           R"(","callStatus":"rejected"}}})";
+}
+
+// Handle VOICE_CALL_END_REQUEST
+std::string handleVoiceCallEnd(const std::string& json) {
+    std::string payload = getJsonObject(json, "payload");
+    std::string messageId = getJsonValue(json, "messageId");
+    std::string sessionToken = getJsonValue(json, "sessionToken");
+    std::string callId = getJsonValue(payload, "callId");
+
+    std::string userId = validateSession(sessionToken);
+    if (userId.empty()) {
+        return R"({"messageType":"VOICE_CALL_END_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Invalid or expired session"}})";
+    }
+
+    VoiceCallSession* call = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        auto it = voiceCalls.find(callId);
+        if (it != voiceCalls.end()) {
+            call = &it->second;
+        }
+    }
+
+    if (!call) {
+        return R"({"messageType":"VOICE_CALL_END_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Call not found"}})";
+    }
+
+    if (!call->involvesUser(userId)) {
+        return R"({"messageType":"VOICE_CALL_END_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"You are not a participant of this call"}})";
+    }
+
+    if (call->hasEnded()) {
+        return R"({"messageType":"VOICE_CALL_END_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Call has already ended"}})";
+    }
+
+    std::string otherUserId = (call->callerId == userId) ? call->receiverId : call->callerId;
+    int64_t duration = 0;
+
+    // End the call
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        call->end(getCurrentTimestamp());
+        duration = call->getDurationSeconds();
+    }
+
+    // Notify other participant
+    std::string endNotification = R"({"messageType":"VOICE_CALL_ENDED","timestamp":)" +
+        std::to_string(getCurrentTimestamp()) +
+        R"(,"payload":{"callId":")" + callId +
+        R"(","endedBy":")" + userId +
+        R"(","duration":)" + std::to_string(duration) + R"(}})";
+    sendPushToUser(otherUserId, endNotification);
+
+    return R"({"messageType":"VOICE_CALL_END_RESPONSE","messageId":")" + messageId +
+           R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+           R"(,"payload":{"status":"success","data":{"callId":")" + callId +
+           R"(","callStatus":"ended","duration":)" + std::to_string(duration) + R"(}}})";
+}
+
+// Handle VOICE_CALL_GET_STATUS_REQUEST
+std::string handleVoiceCallGetStatus(const std::string& json) {
+    std::string payload = getJsonObject(json, "payload");
+    std::string messageId = getJsonValue(json, "messageId");
+    std::string sessionToken = getJsonValue(json, "sessionToken");
+    std::string callId = getJsonValue(payload, "callId");
+
+    std::string userId = validateSession(sessionToken);
+    if (userId.empty()) {
+        return R"({"messageType":"VOICE_CALL_GET_STATUS_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Invalid or expired session"}})";
+    }
+
+    VoiceCallSession call;
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        auto it = voiceCalls.find(callId);
+        if (it != voiceCalls.end()) {
+            call = it->second;
+            found = true;
+        }
+    }
+
+    if (!found) {
+        return R"({"messageType":"VOICE_CALL_GET_STATUS_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Call not found"}})";
+    }
+
+    std::string callerName, receiverName;
+    {
+        std::lock_guard<std::mutex> lock(usersMutex);
+        auto callerIt = userById.find(call.callerId);
+        if (callerIt != userById.end()) callerName = callerIt->second->fullname;
+        auto receiverIt = userById.find(call.receiverId);
+        if (receiverIt != userById.end()) receiverName = receiverIt->second->fullname;
+    }
+
+    std::string statusStr = english_learning::core::voiceCallStatusToString(call.status);
+
+    return R"({"messageType":"VOICE_CALL_GET_STATUS_RESPONSE","messageId":")" + messageId +
+           R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+           R"(,"payload":{"status":"success","data":{"callId":")" + call.callId +
+           R"(","callerId":")" + call.callerId +
+           R"(","callerName":")" + escapeJson(callerName) +
+           R"(","receiverId":")" + call.receiverId +
+           R"(","receiverName":")" + escapeJson(receiverName) +
+           R"(","callStatus":")" + statusStr +
+           R"(","startTime":)" + std::to_string(call.startTime) +
+           R"(,"acceptTime":)" + std::to_string(call.acceptTime) +
+           R"(,"endTime":)" + std::to_string(call.endTime) +
+           R"(,"duration":)" + std::to_string(call.getDurationSeconds()) + R"(}}})";
+}
+
+// ============================================================================
 // XỬ LÝ CLIENT
 // ============================================================================
 
@@ -2993,6 +3367,22 @@ void handleClient(int clientSocket, struct sockaddr_in clientAddr) {
         else if (messageType == "MARK_MESSAGES_READ_REQUEST") {
             response = handleMarkMessagesRead(message);
         }
+        // Voice Call handlers
+        else if (messageType == "VOICE_CALL_INITIATE_REQUEST") {
+            response = handleVoiceCallInitiate(message);
+        }
+        else if (messageType == "VOICE_CALL_ACCEPT_REQUEST") {
+            response = handleVoiceCallAccept(message);
+        }
+        else if (messageType == "VOICE_CALL_REJECT_REQUEST") {
+            response = handleVoiceCallReject(message);
+        }
+        else if (messageType == "VOICE_CALL_END_REQUEST") {
+            response = handleVoiceCallEnd(message);
+        }
+        else if (messageType == "VOICE_CALL_GET_STATUS_REQUEST") {
+            response = handleVoiceCallGetStatus(message);
+        }
         else {
             response = R"({"messageType":"ERROR_RESPONSE","timestamp":)" +
                        std::to_string(getCurrentTimestamp()) +
@@ -3065,10 +3455,11 @@ int main(int argc, char* argv[]) {
     static bridge::BridgeChatRepository chatRepo(chatMessages, chatMutex);
     static bridge::BridgeExerciseRepository exerciseRepo(exercises, exerciseSubmissions, exercisesMutex);
     static bridge::BridgeGameRepository gameRepo(games, gameSessions, gamesMutex);
+    static bridge::BridgeVoiceCallRepository voiceCallRepo(voiceCalls, voiceCallMutex);
 
     // Create service container with dependency injection
     serviceContainer = std::make_unique<service::ServiceContainer>(
-        userRepo, sessionRepo, lessonRepo, testRepo, chatRepo, exerciseRepo, gameRepo);
+        userRepo, sessionRepo, lessonRepo, testRepo, chatRepo, exerciseRepo, gameRepo, voiceCallRepo);
 
     std::cout << "[INFO] Service layer initialized" << std::endl;
     // ========================================================================

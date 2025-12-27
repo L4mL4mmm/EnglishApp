@@ -6,6 +6,7 @@
  */
 
 #include "bridge_repositories.h"
+#include "include/repository/i_voice_call_repository.h"
 
 namespace english_learning {
 namespace repository {
@@ -581,6 +582,149 @@ public:
 private:
     std::map<std::string, core::Game>& games_;
     std::map<std::string, core::GameSession>& sessions_;
+    std::mutex& mutex_;
+};
+
+/**
+ * Bridge voice call repository wrapping global voice calls map.
+ */
+class BridgeVoiceCallRepository : public IVoiceCallRepository {
+public:
+    BridgeVoiceCallRepository(
+        std::map<std::string, core::VoiceCallSession>& calls,
+        std::mutex& mutex)
+        : calls_(calls), mutex_(mutex) {}
+
+    bool add(const core::VoiceCallSession& call) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (calls_.find(call.callId) != calls_.end()) {
+            return false;
+        }
+        calls_[call.callId] = call;
+        return true;
+    }
+
+    std::optional<core::VoiceCallSession> findById(const std::string& callId) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = calls_.find(callId);
+        if (it != calls_.end()) {
+            return it->second;
+        }
+        return std::nullopt;
+    }
+
+    std::vector<core::VoiceCallSession> findAll() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<core::VoiceCallSession> result;
+        for (const auto& pair : calls_) {
+            result.push_back(pair.second);
+        }
+        return result;
+    }
+
+    std::vector<core::VoiceCallSession> findByUser(const std::string& userId) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<core::VoiceCallSession> result;
+        for (const auto& pair : calls_) {
+            if (pair.second.involvesUser(userId)) {
+                result.push_back(pair.second);
+            }
+        }
+        return result;
+    }
+
+    std::vector<core::VoiceCallSession> findActiveByUser(const std::string& userId) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<core::VoiceCallSession> result;
+        for (const auto& pair : calls_) {
+            if (pair.second.involvesUser(userId) && pair.second.isActive()) {
+                result.push_back(pair.second);
+            }
+        }
+        return result;
+    }
+
+    std::vector<core::VoiceCallSession> findPendingForUser(const std::string& userId) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<core::VoiceCallSession> result;
+        for (const auto& pair : calls_) {
+            if (pair.second.receiverId == userId && pair.second.isPending()) {
+                result.push_back(pair.second);
+            }
+        }
+        return result;
+    }
+
+    std::optional<core::VoiceCallSession> findActiveCall(const std::string& userId) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& pair : calls_) {
+            if (pair.second.involvesUser(userId) && pair.second.isActive()) {
+                return pair.second;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<core::VoiceCallSession> findPendingCall(
+        const std::string& callerId, const std::string& receiverId) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& pair : calls_) {
+            if (pair.second.callerId == callerId &&
+                pair.second.receiverId == receiverId &&
+                pair.second.isPending()) {
+                return pair.second;
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool update(const core::VoiceCallSession& call) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = calls_.find(call.callId);
+        if (it != calls_.end()) {
+            it->second = call;
+            return true;
+        }
+        return false;
+    }
+
+    bool updateStatus(const std::string& callId, core::VoiceCallStatus status,
+                      core::Timestamp endTime = 0) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = calls_.find(callId);
+        if (it != calls_.end()) {
+            it->second.status = status;
+            if (endTime > 0) {
+                it->second.endTime = endTime;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    bool remove(const std::string& callId) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return calls_.erase(callId) > 0;
+    }
+
+    size_t count() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return calls_.size();
+    }
+
+    size_t countActiveForUser(const std::string& userId) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        size_t cnt = 0;
+        for (const auto& pair : calls_) {
+            if (pair.second.involvesUser(userId) && pair.second.isActive()) {
+                cnt++;
+            }
+        }
+        return cnt;
+    }
+
+private:
+    std::map<std::string, core::VoiceCallSession>& calls_;
     std::mutex& mutex_;
 };
 

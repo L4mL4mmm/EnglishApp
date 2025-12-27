@@ -85,6 +85,15 @@ std::string pendingChatUserId = "";
 std::string pendingChatUserName = "";
 std::mutex notificationMutex;
 
+// Voice Call variables
+std::atomic<bool> hasIncomingCall(false);
+std::string pendingCallId = "";
+std::string pendingCallerId = "";
+std::string pendingCallerName = "";
+std::string activeCallId = "";
+std::atomic<bool> inCallMode(false);
+std::mutex voiceCallMutex;
+
 // [FIX] Biến để kiểm soát việc hiển thị thông báo
 std::atomic<bool> canShowNotification(true);
 
@@ -235,6 +244,81 @@ void handlePushNotification(const std::string& message) {
             }
         }
     }
+    // Voice Call notifications
+    else if (messageType == "VOICE_CALL_INCOMING") {
+        std::string payload = getJsonObject(message, "payload");
+        std::string callId = getJsonValue(payload, "callId");
+        std::string callerId = getJsonValue(payload, "callerId");
+        std::string callerName = getJsonValue(payload, "callerName");
+
+        {
+            std::lock_guard<std::mutex> lock(voiceCallMutex);
+            pendingCallId = callId;
+            pendingCallerId = callerId;
+            pendingCallerName = callerName;
+            hasIncomingCall = true;
+        }
+
+        if (canShowNotification && !inCallMode) {
+            std::lock_guard<std::mutex> lock(printMutex);
+            std::cout << "\n";
+            std::cout << "\033[35m╔══════════════════════════════════════════╗\033[0m\n";
+            std::cout << "\033[35m║  INCOMING VOICE CALL from \033[36m" << callerName << "\033[35m!\033[0m\n";
+            std::cout << "\033[35m║  Press 'c' in menu to answer             ║\033[0m\n";
+            std::cout << "\033[35m╚══════════════════════════════════════════╝\033[0m\n";
+            std::cout << std::flush;
+        }
+    }
+    else if (messageType == "VOICE_CALL_ACCEPTED") {
+        std::string payload = getJsonObject(message, "payload");
+        std::string callId = getJsonValue(payload, "callId");
+        std::string receiverName = getJsonValue(payload, "receiverName");
+
+        {
+            std::lock_guard<std::mutex> lock(voiceCallMutex);
+            activeCallId = callId;
+            inCallMode = true;
+        }
+
+        std::lock_guard<std::mutex> lock(printMutex);
+        std::cout << "\n";
+        std::cout << "\033[32m╔══════════════════════════════════════════╗\033[0m\n";
+        std::cout << "\033[32m║  CALL CONNECTED with \033[36m" << receiverName << "\033[32m!\033[0m\n";
+        std::cout << "\033[32m║  (Simulated voice call active)           ║\033[0m\n";
+        std::cout << "\033[32m╚══════════════════════════════════════════╝\033[0m\n";
+        std::cout << std::flush;
+    }
+    else if (messageType == "VOICE_CALL_REJECTED") {
+        {
+            std::lock_guard<std::mutex> lock(voiceCallMutex);
+            activeCallId = "";
+            inCallMode = false;
+        }
+
+        std::lock_guard<std::mutex> lock(printMutex);
+        std::cout << "\n";
+        std::cout << "\033[31m╔══════════════════════════════════════════╗\033[0m\n";
+        std::cout << "\033[31m║  CALL REJECTED by receiver               ║\033[0m\n";
+        std::cout << "\033[31m╚══════════════════════════════════════════╝\033[0m\n";
+        std::cout << std::flush;
+    }
+    else if (messageType == "VOICE_CALL_ENDED") {
+        std::string payload = getJsonObject(message, "payload");
+        std::string durationStr = getJsonValue(payload, "duration");
+
+        {
+            std::lock_guard<std::mutex> lock(voiceCallMutex);
+            activeCallId = "";
+            inCallMode = false;
+        }
+
+        std::lock_guard<std::mutex> lock(printMutex);
+        std::cout << "\n";
+        std::cout << "\033[33m╔══════════════════════════════════════════╗\033[0m\n";
+        std::cout << "\033[33m║  CALL ENDED (Duration: " << durationStr << "s)\033[0m\n";
+        std::cout << "\033[33m╚══════════════════════════════════════════╝\033[0m\n";
+        std::cout << std::flush;
+    }
 }
 
 // ============================================================================
@@ -298,7 +382,9 @@ void receiveThreadFunc() {
             // Phân loại message
             std::string messageType = getJsonValue(buffer, "messageType");
 
-            if (messageType == "RECEIVE_MESSAGE" || messageType == "UNREAD_MESSAGES_NOTIFICATION") {
+            if (messageType == "RECEIVE_MESSAGE" || messageType == "UNREAD_MESSAGES_NOTIFICATION" ||
+                messageType == "VOICE_CALL_INCOMING" || messageType == "VOICE_CALL_ACCEPTED" ||
+                messageType == "VOICE_CALL_REJECTED" || messageType == "VOICE_CALL_ENDED") {
                 // [FIX] Đây là push notification, xử lý ngay
                 handlePushNotification(buffer);
             } else {
@@ -394,9 +480,10 @@ void showMainMenu() {
     printColored("║  2. View All Lessons                     ║\n", "");
     printColored("║  3. Take a Test                          ║\n", "");
     printColored("║  4. Do Exercises                         ║\n", "");
-    printColored("║  5. Play Games                            ║\n", "");
+    printColored("║  5. Play Games                           ║\n", "");
     printColored("║  6. Chat with Others                     ║\n", "");
-    printColored("║  7. Logout                               ║\n", "");
+    printColored("║  7. Voice Call                           ║\n", "");
+    printColored("║  8. Logout                               ║\n", "");
     printColored("║  0. Exit                                 ║\n", "");
     printColored("╚══════════════════════════════════════════╝\n", "cyan");
 
@@ -405,11 +492,24 @@ void showMainMenu() {
         std::lock_guard<std::mutex> lock(notificationMutex);
         if (hasNewNotification && !pendingChatUserName.empty()) {
             printColored("╔══════════════════════════════════════════╗\n", "yellow");
-            printColored("║  📬 New message from ", "yellow");
+            printColored("║  New message from ", "yellow");
             printColored(pendingChatUserName, "cyan");
             printColored("!\n", "yellow");
             printColored("║  Press 'r' to reply quickly              ║\n", "yellow");
             printColored("╚══════════════════════════════════════════╝\n", "yellow");
+        }
+    }
+
+    // Display incoming call notification
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        if (hasIncomingCall && !pendingCallerName.empty()) {
+            printColored("╔══════════════════════════════════════════╗\n", "magenta");
+            printColored("║  INCOMING CALL from ", "magenta");
+            printColored(pendingCallerName, "cyan");
+            printColored("!\n", "magenta");
+            printColored("║  Press 'c' to answer                     ║\n", "magenta");
+            printColored("╚══════════════════════════════════════════╝\n", "magenta");
         }
     }
 
@@ -1675,6 +1775,284 @@ void chat() {
 }
 
 // ============================================================================
+// VOICE CALL
+// ============================================================================
+
+void answerIncomingCall() {
+    std::string callId, callerId, callerName;
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        if (!hasIncomingCall || pendingCallId.empty()) {
+            printColored("\nNo incoming call to answer.\n", "yellow");
+            waitEnter();
+            return;
+        }
+        callId = pendingCallId;
+        callerId = pendingCallerId;
+        callerName = pendingCallerName;
+    }
+
+    printColored("\nIncoming call from: ", "cyan");
+    printColored(callerName, "yellow");
+    printColored("\n", "");
+    printColored("1. Accept call\n", "green");
+    printColored("2. Reject call\n", "red");
+    printColored("Choice: ", "green");
+
+    std::string input;
+    std::getline(std::cin, input);
+
+    if (input == "1") {
+        // Accept call
+        std::string request = R"({"messageType":"VOICE_CALL_ACCEPT_REQUEST","messageId":")" + generateMessageId() +
+                              R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                              R"(,"sessionToken":")" + sessionToken +
+                              R"(","payload":{"callId":")" + callId + R"("}})";
+
+        std::string response = sendAndReceive(request);
+        std::string status = getJsonValue(response, "status");
+
+        if (status == "success") {
+            {
+                std::lock_guard<std::mutex> lock(voiceCallMutex);
+                activeCallId = callId;
+                inCallMode = true;
+                hasIncomingCall = false;
+                pendingCallId = "";
+                pendingCallerId = "";
+                pendingCallerName = "";
+            }
+
+            printColored("\n╔══════════════════════════════════════════╗\n", "green");
+            printColored("║  CALL CONNECTED!                         ║\n", "green");
+            printColored("║  Talking with: ", "green");
+            printColored(callerName, "cyan");
+            printColored("\n", "");
+            printColored("║  (Simulated voice call - no audio)       ║\n", "green");
+            printColored("║  Press Enter to end call                 ║\n", "green");
+            printColored("╚══════════════════════════════════════════╝\n", "green");
+
+            std::getline(std::cin, input); // Wait for user to end call
+
+            // End call
+            std::string endRequest = R"({"messageType":"VOICE_CALL_END_REQUEST","messageId":")" + generateMessageId() +
+                                  R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                                  R"(,"sessionToken":")" + sessionToken +
+                                  R"(","payload":{"callId":")" + callId + R"("}})";
+            sendAndReceive(endRequest);
+
+            {
+                std::lock_guard<std::mutex> lock(voiceCallMutex);
+                activeCallId = "";
+                inCallMode = false;
+            }
+
+            printColored("\nCall ended.\n", "yellow");
+        } else {
+            std::string errorMsg = getJsonValue(response, "message");
+            printColored("\nFailed to accept call: " + errorMsg + "\n", "red");
+        }
+    } else {
+        // Reject call
+        std::string request = R"({"messageType":"VOICE_CALL_REJECT_REQUEST","messageId":")" + generateMessageId() +
+                              R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                              R"(,"sessionToken":")" + sessionToken +
+                              R"(","payload":{"callId":")" + callId + R"("}})";
+
+        sendAndReceive(request);
+
+        {
+            std::lock_guard<std::mutex> lock(voiceCallMutex);
+            hasIncomingCall = false;
+            pendingCallId = "";
+            pendingCallerId = "";
+            pendingCallerName = "";
+        }
+
+        printColored("\nCall rejected.\n", "yellow");
+    }
+
+    waitEnter();
+}
+
+void voiceCall() {
+    clearScreen();
+    printColored("╔══════════════════════════════════════════╗\n", "cyan");
+    printColored("║              VOICE CALL                  ║\n", "cyan");
+    printColored("╚══════════════════════════════════════════╝\n", "cyan");
+
+    // Check for incoming call first
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        if (hasIncomingCall && !pendingCallId.empty()) {
+            printColored("\nYou have an incoming call from ", "yellow");
+            printColored(pendingCallerName, "cyan");
+            printColored("!\n", "yellow");
+            printColored("Press 'a' to answer, or any other key to make a new call: ", "green");
+
+            std::string input;
+            std::getline(std::cin, input);
+            if (input == "a" || input == "A") {
+                answerIncomingCall();
+                return;
+            }
+        }
+    }
+
+    // Get contact list (reuse chat contacts)
+    std::string request = R"({"messageType":"GET_CONTACT_LIST_REQUEST","messageId":")" + generateMessageId() +
+                          R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                          R"(,"sessionToken":")" + sessionToken +
+                          R"(","payload":{"contactType":"all","online":true}})";
+
+    std::string response = sendAndReceive(request);
+    std::string status = getJsonValue(response, "status");
+
+    if (status != "success") {
+        printColored("\nFailed to get contact list.\n", "red");
+        waitEnter();
+        return;
+    }
+
+    std::string data = getJsonObject(response, "data");
+    std::string contactsArray = getJsonArray(data, "contacts");
+    std::vector<std::string> contacts = parseJsonArray(contactsArray);
+
+    // Filter only online contacts
+    std::vector<std::pair<std::string, std::string>> onlineContacts;
+    for (const std::string& contact : contacts) {
+        std::string contactStatus = getJsonValue(contact, "status");
+        if (contactStatus == "online") {
+            std::string id = getJsonValue(contact, "userId");
+            std::string name = getJsonValue(contact, "fullName");
+            onlineContacts.push_back({id, name});
+        }
+    }
+
+    if (onlineContacts.empty()) {
+        printColored("\nNo online users available for voice call.\n", "yellow");
+        waitEnter();
+        return;
+    }
+
+    printColored("\n┌────┬────────────────────────────────────────┐\n", "cyan");
+    printColored("│ #  │ Name (Online)                          │\n", "cyan");
+    printColored("├────┼────────────────────────────────────────┤\n", "cyan");
+
+    int idx = 1;
+    for (const auto& contact : onlineContacts) {
+        std::cout << "│ " << std::setw(2) << idx << " │ ";
+        printColored(contact.second, "green");
+        std::cout << std::string(40 - contact.second.length(), ' ') << "│\n";
+        idx++;
+    }
+
+    printColored("└────┴────────────────────────────────────────┘\n", "cyan");
+
+    printColored("\nEnter number to call (0 to go back): ", "green");
+
+    std::string input;
+    std::getline(std::cin, input);
+
+    int choice;
+    try {
+        choice = std::stoi(input);
+    } catch (...) {
+        return;
+    }
+
+    if (choice <= 0 || choice > (int)onlineContacts.size()) {
+        return;
+    }
+
+    std::string receiverId = onlineContacts[choice - 1].first;
+    std::string receiverName = onlineContacts[choice - 1].second;
+
+    // Select audio source
+    printColored("\nSelect audio source:\n", "cyan");
+    printColored("1. Microphone (simulated)\n", "");
+    printColored("2. System audio (simulated)\n", "");
+    printColored("Choice (default 1): ", "green");
+
+    std::getline(std::cin, input);
+    std::string audioSource = (input == "2") ? "system" : "microphone";
+
+    // Initiate call
+    printColored("\nCalling ", "yellow");
+    printColored(receiverName, "cyan");
+    printColored("...\n", "yellow");
+
+    std::string callRequest = R"({"messageType":"VOICE_CALL_INITIATE_REQUEST","messageId":")" + generateMessageId() +
+                              R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                              R"(,"sessionToken":")" + sessionToken +
+                              R"(","payload":{"receiverId":")" + receiverId +
+                              R"(","audioSource":")" + audioSource + R"("}})";
+
+    std::string callResponse = sendAndReceive(callRequest);
+    status = getJsonValue(callResponse, "status");
+
+    if (status != "success") {
+        std::string errorMsg = getJsonValue(callResponse, "message");
+        printColored("\nFailed to initiate call: " + errorMsg + "\n", "red");
+        waitEnter();
+        return;
+    }
+
+    std::string callData = getJsonObject(callResponse, "data");
+    std::string callId = getJsonValue(callData, "callId");
+
+    printColored("Waiting for ", "yellow");
+    printColored(receiverName, "cyan");
+    printColored(" to answer...\n", "yellow");
+    printColored("(Press Enter to cancel)\n", "");
+
+    // Wait for response or user cancel
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        activeCallId = callId;
+    }
+
+    // Simple wait - in a real app this would be async
+    std::getline(std::cin, input);
+
+    // Check if call was accepted
+    bool callActive = false;
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        callActive = inCallMode && (activeCallId == callId);
+    }
+
+    if (callActive) {
+        printColored("\n╔══════════════════════════════════════════╗\n", "green");
+        printColored("║  CALL CONNECTED!                         ║\n", "green");
+        printColored("║  Talking with: ", "green");
+        printColored(receiverName, "cyan");
+        printColored("\n", "");
+        printColored("║  (Simulated voice call - no audio)       ║\n", "green");
+        printColored("║  Press Enter to end call                 ║\n", "green");
+        printColored("╚══════════════════════════════════════════╝\n", "green");
+
+        std::getline(std::cin, input);
+    }
+
+    // End call
+    std::string endRequest = R"({"messageType":"VOICE_CALL_END_REQUEST","messageId":")" + generateMessageId() +
+                          R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                          R"(,"sessionToken":")" + sessionToken +
+                          R"(","payload":{"callId":")" + callId + R"("}})";
+    sendAndReceive(endRequest);
+
+    {
+        std::lock_guard<std::mutex> lock(voiceCallMutex);
+        activeCallId = "";
+        inCallMode = false;
+    }
+
+    printColored("\nCall ended.\n", "yellow");
+    waitEnter();
+}
+
+// ============================================================================
 // SIGNAL HANDLER & MAIN
 // ============================================================================
 
@@ -1788,6 +2166,8 @@ int main_cli(int argc, char* argv[]) {
         } else if (input == "6") {
             chat();
         } else if (input == "7") {
+            voiceCall();
+        } else if (input == "8") {
             loggedIn = false;
             sessionToken = "";
             currentUserId = "";
@@ -1796,6 +2176,9 @@ int main_cli(int argc, char* argv[]) {
             waitEnter();
         } else if (input == "0") {
             running = false;
+        } else if (input == "c" || input == "C") {
+            // Answer incoming call
+            answerIncomingCall();
         } else if (input == "r" || input == "R") {
             // [FIX] Phản hồi nhanh tin nhắn mới
             std::string quickReplyId;

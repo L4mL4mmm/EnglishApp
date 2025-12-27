@@ -14,5 +14,6 @@
 #include "chat_message.h"
 #include "exercise.h"
 #include "game.h"
+#include "voice_call.h"
 
 #endif // ENGLISH_LEARNING_CORE_ALL_H

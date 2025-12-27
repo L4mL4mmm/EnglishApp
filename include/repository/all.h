@@ -12,5 +12,6 @@
 #include "i_chat_repository.h"
 #include "i_exercise_repository.h"
 #include "i_game_repository.h"
+#include "i_voice_call_repository.h"
 
 #endif // ENGLISH_LEARNING_REPOSITORY_ALL_H

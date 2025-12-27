@@ -1523,6 +1523,195 @@ void show_level_dialog() {
   gtk_widget_destroy(dialog);
 }
 
+// =========================================================
+// VOICE CALL DIALOG
+// =========================================================
+
+static void on_voice_call_button_clicked(GtkWidget *widget, gpointer data) {
+  std::string *receiverId = static_cast<std::string *>(data);
+  if (!receiverId || receiverId->empty()) {
+    GtkWidget *error =
+        gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+                               GTK_BUTTONS_OK, "Invalid contact selected");
+    gtk_dialog_run(GTK_DIALOG(error));
+    gtk_widget_destroy(error);
+    return;
+  }
+
+  // Initiate call
+  std::string callReq =
+      "{\"messageType\":\"VOICE_CALL_INITIATE_REQUEST\", \"sessionToken\":\"" +
+      sessionToken + "\", \"payload\":{\"receiverId\":\"" + *receiverId +
+      "\", \"audioSource\":\"microphone\"}}";
+
+  GtkWidget *calling =
+      gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO,
+                             GTK_BUTTONS_CANCEL, "Calling... Please wait");
+  gtk_widget_show_now(calling);
+  while (gtk_events_pending())
+    gtk_main_iteration();
+
+  if (!sendMessage(callReq)) {
+    gtk_widget_destroy(calling);
+    GtkWidget *error =
+        gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+                               GTK_BUTTONS_OK, "Failed to initiate call");
+    gtk_dialog_run(GTK_DIALOG(error));
+    gtk_widget_destroy(error);
+    return;
+  }
+
+  std::string response = waitForResponse(5000);
+  gtk_widget_destroy(calling);
+
+  if (response.find("\"status\":\"success\"") != std::string::npos) {
+    // Extract call ID
+    size_t idStart = response.find("\"callId\":\"");
+    std::string callId = "";
+    if (idStart != std::string::npos) {
+      idStart += 10;
+      size_t idEnd = response.find("\"", idStart);
+      callId = response.substr(idStart, idEnd - idStart);
+    }
+
+    GtkWidget *callDialog = gtk_message_dialog_new(
+        NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_CLOSE,
+        "Call initiated!\n\nCall ID: %s\n\n"
+        "(Simulated voice call - no actual audio)\n"
+        "Click Close to end the call.",
+        callId.c_str());
+    gtk_dialog_run(GTK_DIALOG(callDialog));
+    gtk_widget_destroy(callDialog);
+
+    // End call
+    if (!callId.empty()) {
+      std::string endReq =
+          "{\"messageType\":\"VOICE_CALL_END_REQUEST\", \"sessionToken\":\"" +
+          sessionToken + "\", \"payload\":{\"callId\":\"" + callId + "\"}}";
+      sendMessage(endReq);
+      waitForResponse(2000);
+    }
+  } else {
+    std::string errorMsg = "Failed to start call";
+    size_t msgStart = response.find("\"message\":\"");
+    if (msgStart != std::string::npos) {
+      msgStart += 11;
+      size_t msgEnd = response.find("\"", msgStart);
+      errorMsg = response.substr(msgStart, msgEnd - msgStart);
+    }
+    GtkWidget *error = gtk_message_dialog_new(
+        NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "%s",
+        errorMsg.c_str());
+    gtk_dialog_run(GTK_DIALOG(error));
+    gtk_widget_destroy(error);
+  }
+}
+
+void show_voice_call_dialog() {
+  // Get online contacts
+  std::string jsonRequest =
+      "{\"messageType\":\"GET_CONTACT_LIST_REQUEST\", \"sessionToken\":\"" +
+      sessionToken + "\", \"payload\":{}}";
+
+  GtkWidget *loading =
+      gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO,
+                             GTK_BUTTONS_NONE, "Loading contacts...");
+  gtk_widget_show_now(loading);
+  while (gtk_events_pending())
+    gtk_main_iteration();
+
+  if (!sendMessage(jsonRequest)) {
+    gtk_widget_destroy(loading);
+    GtkWidget *error =
+        gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+                               GTK_BUTTONS_OK, "Failed to load contacts");
+    gtk_dialog_run(GTK_DIALOG(error));
+    gtk_widget_destroy(error);
+    return;
+  }
+
+  std::string response = waitForResponse(3000);
+  gtk_widget_destroy(loading);
+
+  // Parse online contacts
+  std::vector<std::pair<std::string, std::string>> onlineContacts;
+  size_t pos = 0;
+  while ((pos = response.find("\"userId\"", pos)) != std::string::npos) {
+    size_t idStart = response.find("\"", pos + 9);
+    size_t idEnd = response.find("\"", idStart + 1);
+    std::string userId = response.substr(idStart + 1, idEnd - idStart - 1);
+
+    // Check if online
+    size_t statusPos = response.find("\"status\"", pos);
+    bool isOnline = false;
+    if (statusPos != std::string::npos && statusPos < pos + 300) {
+      size_t statusStart = response.find("\"", statusPos + 9);
+      size_t statusEnd = response.find("\"", statusStart + 1);
+      std::string status =
+          response.substr(statusStart + 1, statusEnd - statusStart - 1);
+      isOnline = (status == "online");
+    }
+
+    if (isOnline) {
+      size_t namePos = response.find("\"fullName\"", pos);
+      if (namePos == std::string::npos)
+        namePos = response.find("\"fullname\"", pos);
+      if (namePos != std::string::npos && namePos < pos + 300) {
+        size_t nameStart = response.find("\"", namePos + 11);
+        size_t nameEnd = response.find("\"", nameStart + 1);
+        std::string name =
+            response.substr(nameStart + 1, nameEnd - nameStart - 1);
+        onlineContacts.push_back({userId, name});
+      }
+    }
+    pos = idEnd;
+  }
+
+  // Create dialog
+  GtkWidget *dialog = gtk_dialog_new_with_buttons(
+      "Voice Call", GTK_WINDOW(window), GTK_DIALOG_MODAL, "Close",
+      GTK_RESPONSE_CLOSE, NULL);
+  gtk_window_set_default_size(GTK_WINDOW(dialog), 350, 400);
+
+  GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+  GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled),
+                                 GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_box_pack_start(GTK_BOX(content), scrolled, TRUE, TRUE, 5);
+
+  GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+  gtk_container_add(GTK_CONTAINER(scrolled), vbox);
+
+  GtkWidget *title = gtk_label_new(NULL);
+  gtk_label_set_markup(GTK_LABEL(title),
+                       "<b>Online Contacts - Click to Call</b>");
+  gtk_box_pack_start(GTK_BOX(vbox), title, FALSE, FALSE, 10);
+
+  if (onlineContacts.empty()) {
+    GtkWidget *noContacts =
+        gtk_label_new("No online contacts available for voice call.");
+    gtk_box_pack_start(GTK_BOX(vbox), noContacts, FALSE, FALSE, 20);
+  } else {
+    // Store user IDs for callbacks (static to persist)
+    static std::vector<std::string> storedIds;
+    storedIds.clear();
+    storedIds.reserve(onlineContacts.size());
+
+    for (const auto &contact : onlineContacts) {
+      storedIds.push_back(contact.first);
+      std::string label = "Call " + contact.second;
+      GtkWidget *btn = gtk_button_new_with_label(label.c_str());
+      g_signal_connect(btn, "clicked", G_CALLBACK(on_voice_call_button_clicked),
+                       &storedIds.back());
+      gtk_box_pack_start(GTK_BOX(vbox), btn, FALSE, FALSE, 5);
+    }
+  }
+
+  gtk_widget_show_all(dialog);
+  gtk_dialog_run(GTK_DIALOG(dialog));
+  gtk_widget_destroy(dialog);
+}
+
 void on_menu_btn_clicked(GtkWidget *widget, gpointer data) {
   int choice = GPOINTER_TO_INT(data);
   switch (choice) {
@@ -1542,6 +1731,9 @@ void on_menu_btn_clicked(GtkWidget *widget, gpointer data) {
     show_game_dialog();
     break;
   case 5:
+    show_voice_call_dialog();
+    break;
+  case 6:
     gtk_main_quit();
     break;
   }
@@ -1563,8 +1755,8 @@ void show_main_menu() {
   gtk_box_pack_start(GTK_BOX(vbox_menu), lbl, FALSE, FALSE, 10);
 
   const char *buttons[] = {"1. Chọn cấp độ", "2. Học bài", "3. Làm bài thi",
-                           "4. Chat",        "5. Game",    "Thoát"};
-  for (int i = 0; i < 6; i++) {
+                           "4. Chat",        "5. Game",    "6. Voice Call", "Thoát"};
+  for (int i = 0; i < 7; i++) {
     GtkWidget *btn = gtk_button_new_with_label(buttons[i]);
     g_signal_connect(btn, "clicked", G_CALLBACK(on_menu_btn_clicked),
                      GINT_TO_POINTER(i));

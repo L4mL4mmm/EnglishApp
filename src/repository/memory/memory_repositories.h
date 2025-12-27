@@ -9,6 +9,7 @@
 #include "include/repository/i_chat_repository.h"
 #include "include/repository/i_exercise_repository.h"
 #include "include/repository/i_game_repository.h"
+#include "include/repository/i_voice_call_repository.h"
 
 namespace english_learning {
 namespace repository {
@@ -160,6 +161,32 @@ private:
     mutable std::mutex mutex_;
     std::map<std::string, core::Game> games_;
     std::map<std::string, core::GameSession> sessions_;
+};
+
+/**
+ * In-memory implementation of IVoiceCallRepository.
+ */
+class MemoryVoiceCallRepository : public IVoiceCallRepository {
+public:
+    bool add(const core::VoiceCallSession& call) override;
+    std::optional<core::VoiceCallSession> findById(const std::string& callId) const override;
+    std::vector<core::VoiceCallSession> findAll() const override;
+    std::vector<core::VoiceCallSession> findByUser(const std::string& userId) const override;
+    std::vector<core::VoiceCallSession> findActiveByUser(const std::string& userId) const override;
+    std::vector<core::VoiceCallSession> findPendingForUser(const std::string& userId) const override;
+    std::optional<core::VoiceCallSession> findActiveCall(const std::string& userId) const override;
+    std::optional<core::VoiceCallSession> findPendingCall(
+        const std::string& callerId, const std::string& receiverId) const override;
+    bool update(const core::VoiceCallSession& call) override;
+    bool updateStatus(const std::string& callId, core::VoiceCallStatus status,
+                      core::Timestamp endTime = 0) override;
+    bool remove(const std::string& callId) override;
+    size_t count() const override;
+    size_t countActiveForUser(const std::string& userId) const override;
+
+private:
+    mutable std::mutex mutex_;
+    std::map<std::string, core::VoiceCallSession> calls_;
 };
 
 } // namespace memory

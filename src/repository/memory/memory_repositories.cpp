@@ -573,6 +573,132 @@ size_t MemoryGameRepository::countSessions() const {
     return sessions_.size();
 }
 
+// ============================================================================
+// MemoryVoiceCallRepository
+// ============================================================================
+
+bool MemoryVoiceCallRepository::add(const core::VoiceCallSession& call) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (calls_.find(call.callId) != calls_.end()) return false;
+    calls_[call.callId] = call;
+    return true;
+}
+
+std::optional<core::VoiceCallSession> MemoryVoiceCallRepository::findById(
+    const std::string& callId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = calls_.find(callId);
+    return (it != calls_.end()) ? std::optional(it->second) : std::nullopt;
+}
+
+std::vector<core::VoiceCallSession> MemoryVoiceCallRepository::findAll() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<core::VoiceCallSession> result;
+    for (const auto& p : calls_) result.push_back(p.second);
+    return result;
+}
+
+std::vector<core::VoiceCallSession> MemoryVoiceCallRepository::findByUser(
+    const std::string& userId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<core::VoiceCallSession> result;
+    for (const auto& p : calls_) {
+        if (p.second.involvesUser(userId)) result.push_back(p.second);
+    }
+    return result;
+}
+
+std::vector<core::VoiceCallSession> MemoryVoiceCallRepository::findActiveByUser(
+    const std::string& userId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<core::VoiceCallSession> result;
+    for (const auto& p : calls_) {
+        if (p.second.involvesUser(userId) && p.second.isActive()) {
+            result.push_back(p.second);
+        }
+    }
+    return result;
+}
+
+std::vector<core::VoiceCallSession> MemoryVoiceCallRepository::findPendingForUser(
+    const std::string& userId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<core::VoiceCallSession> result;
+    for (const auto& p : calls_) {
+        if (p.second.receiverId == userId && p.second.isPending()) {
+            result.push_back(p.second);
+        }
+    }
+    return result;
+}
+
+std::optional<core::VoiceCallSession> MemoryVoiceCallRepository::findActiveCall(
+    const std::string& userId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& p : calls_) {
+        if (p.second.involvesUser(userId) && p.second.isActive()) {
+            return p.second;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<core::VoiceCallSession> MemoryVoiceCallRepository::findPendingCall(
+    const std::string& callerId, const std::string& receiverId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& p : calls_) {
+        if (p.second.callerId == callerId && p.second.receiverId == receiverId &&
+            p.second.isPending()) {
+            return p.second;
+        }
+    }
+    return std::nullopt;
+}
+
+bool MemoryVoiceCallRepository::update(const core::VoiceCallSession& call) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = calls_.find(call.callId);
+    if (it != calls_.end()) {
+        it->second = call;
+        return true;
+    }
+    return false;
+}
+
+bool MemoryVoiceCallRepository::updateStatus(const std::string& callId,
+                                              core::VoiceCallStatus status,
+                                              core::Timestamp endTime) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = calls_.find(callId);
+    if (it != calls_.end()) {
+        it->second.status = status;
+        if (endTime > 0) {
+            it->second.endTime = endTime;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool MemoryVoiceCallRepository::remove(const std::string& callId) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return calls_.erase(callId) > 0;
+}
+
+size_t MemoryVoiceCallRepository::count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return calls_.size();
+}
+
+size_t MemoryVoiceCallRepository::countActiveForUser(const std::string& userId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    size_t c = 0;
+    for (const auto& p : calls_) {
+        if (p.second.involvesUser(userId) && p.second.isActive()) ++c;
+    }
+    return c;
+}
+
 } // namespace memory
 } // namespace repository
 } // namespace english_learning
