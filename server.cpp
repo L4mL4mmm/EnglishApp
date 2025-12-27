@@ -252,6 +252,8 @@ void initSampleData() {
     lesson1.topic = "grammar";
     lesson1.level = "beginner";
     lesson1.duration = 30;
+    lesson1.videoUrl = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";  // Sample video
+    lesson1.audioUrl = "/usr/share/sounds/freedesktop/stereo/complete.oga";  // Sample system audio
     lesson1.textContent = R"(
 ========================================
         PRESENT SIMPLE TENSE
@@ -332,6 +334,8 @@ V Does she speak English?
     lesson2.topic = "vocabulary";
     lesson2.level = "beginner";
     lesson2.duration = 25;
+    lesson2.videoUrl = "";  // No video for this lesson
+    lesson2.audioUrl = "/usr/share/sounds/freedesktop/stereo/message.oga";  // Audio pronunciation
     lesson2.textContent = R"(
 ========================================
      COMMON DAILY VOCABULARY
@@ -425,6 +429,8 @@ V Does she speak English?
     lesson3.topic = "listening";
     lesson3.level = "beginner";
     lesson3.duration = 20;
+    lesson3.videoUrl = "https://www.youtube.com/watch?v=JGwWNGJdvx8";  // English listening practice
+    lesson3.audioUrl = "/usr/share/sounds/freedesktop/stereo/dialog-information.oga";
     lesson3.textContent = R"(
 ========================================
     INTRODUCTION TO LISTENING
@@ -1563,7 +1569,8 @@ std::string handleGetLessonDetail(const std::string& json) {
            R"(","duration":)" + std::to_string(lesson.duration) +
            R"(,"content":")" + escapeJson(lesson.textContent) +
            R"(","textContent":")" + escapeJson(lesson.textContent) +
-           R"(","videoUrl":"[Simulated Video]","audioUrl":"[Simulated Audio]"}}})";
+           R"(","videoUrl":")" + escapeJson(lesson.videoUrl) +
+           R"(","audioUrl":")" + escapeJson(lesson.audioUrl) + R"("}}})";
 }
 
 // Xử lý GET_TEST_REQUEST

@@ -108,6 +108,98 @@ static std::string escape_json(const std::string &s) {
 }
 
 // =========================================================
+// MEDIA PLAYBACK HELPERS
+// =========================================================
+
+// Play video using xdg-open (opens default browser/player)
+static void play_video(const std::string &url) {
+  if (url.empty()) {
+    GtkWidget *msg = gtk_message_dialog_new(
+        NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+        "No video available for this lesson.");
+    gtk_dialog_run(GTK_DIALOG(msg));
+    gtk_widget_destroy(msg);
+    return;
+  }
+
+  g_print("[VIDEO] Playing: %s\n", url.c_str());
+
+  // Use xdg-open for URLs (opens default browser for YouTube, etc.)
+  // Use mpv or vlc for local files
+  std::string command;
+  if (url.find("http://") == 0 || url.find("https://") == 0) {
+    command = "xdg-open \"" + url + "\" &";
+  } else {
+    // Local file - try mpv first, then vlc, then xdg-open
+    command = "(which mpv && mpv --no-terminal \"" + url +
+              "\") || (which vlc && vlc \"" + url +
+              "\") || xdg-open \"" + url + "\" &";
+  }
+
+  int result = system(command.c_str());
+  if (result != 0) {
+    GtkWidget *msg = gtk_message_dialog_new(
+        NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+        "Failed to play video.\nURL: %s", url.c_str());
+    gtk_dialog_run(GTK_DIALOG(msg));
+    gtk_widget_destroy(msg);
+  }
+}
+
+// Play audio using available audio players
+static void play_audio(const std::string &url) {
+  if (url.empty()) {
+    GtkWidget *msg = gtk_message_dialog_new(
+        NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+        "No audio available for this lesson.");
+    gtk_dialog_run(GTK_DIALOG(msg));
+    gtk_widget_destroy(msg);
+    return;
+  }
+
+  g_print("[AUDIO] Playing: %s\n", url.c_str());
+
+  std::string command;
+  if (url.find("http://") == 0 || url.find("https://") == 0) {
+    // For URLs, use mpv or vlc (audio-only mode)
+    command = "(which mpv && mpv --no-video --no-terminal \"" + url +
+              "\") || (which vlc && cvlc --play-and-exit \"" + url +
+              "\") || xdg-open \"" + url + "\" &";
+  } else {
+    // Local file - try paplay (PulseAudio), aplay, mpv, or vlc
+    command = "(which paplay && paplay \"" + url +
+              "\") || (which aplay && aplay \"" + url +
+              "\") || (which mpv && mpv --no-video --no-terminal \"" + url +
+              "\") || (which vlc && cvlc --play-and-exit \"" + url + "\") &";
+  }
+
+  int result = system(command.c_str());
+  if (result != 0) {
+    GtkWidget *msg = gtk_message_dialog_new(
+        NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+        "Failed to play audio.\nFile: %s", url.c_str());
+    gtk_dialog_run(GTK_DIALOG(msg));
+    gtk_widget_destroy(msg);
+  }
+}
+
+// Callback for video button
+static void on_play_video_clicked(GtkWidget *widget, gpointer data) {
+  const char *url = (const char *)data;
+  if (url) {
+    play_video(std::string(url));
+  }
+}
+
+// Callback for audio button
+static void on_play_audio_clicked(GtkWidget *widget, gpointer data) {
+  const char *url = (const char *)data;
+  if (url) {
+    play_audio(std::string(url));
+  }
+}
+
+// =========================================================
 // 2. CÁC HÀM TIỆN ÍCH (HELPER)
 // =========================================================
 
@@ -475,6 +567,10 @@ void show_test_dialog() {
 // 4. CHỨC NĂNG: HỌC BÀI (View Lessons - Parse JSON)
 // =========================================================
 
+// Static storage for media URLs (freed when dialog closes)
+static char *g_current_video_url = nullptr;
+static char *g_current_audio_url = nullptr;
+
 void show_lesson_content(const char *lessonId) {
   std::string jsonRequest =
       "{\"messageType\":\"GET_LESSON_DETAIL_REQUEST\", \"sessionToken\":\"" +
@@ -492,6 +588,7 @@ void show_lesson_content(const char *lessonId) {
     std::string response = waitForResponse(3000);
     gtk_widget_destroy(loading);
 
+    // Parse lesson content
     std::string content = "Không có nội dung.";
     std::regex re_content("\"content\"\\s*:\\s*\"(.*?)\"");
     std::smatch match;
@@ -504,20 +601,122 @@ void show_lesson_content(const char *lessonId) {
       }
     }
 
+    // Parse lesson title
+    std::string title = "Bài học";
+    std::regex re_title("\"title\"\\s*:\\s*\"([^\"]+)\"");
+    if (std::regex_search(response, match, re_title) && match.size() > 1) {
+      title = match.str(1);
+    }
+
+    // Parse video URL
+    std::string videoUrl = "";
+    std::regex re_video("\"videoUrl\"\\s*:\\s*\"([^\"]*)\"");
+    if (std::regex_search(response, match, re_video) && match.size() > 1) {
+      videoUrl = match.str(1);
+    }
+
+    // Parse audio URL
+    std::string audioUrl = "";
+    std::regex re_audio("\"audioUrl\"\\s*:\\s*\"([^\"]*)\"");
+    if (std::regex_search(response, match, re_audio) && match.size() > 1) {
+      audioUrl = match.str(1);
+    }
+
+    g_print("[LESSON] Title: %s, Video: %s, Audio: %s\n", title.c_str(),
+            videoUrl.empty() ? "(none)" : videoUrl.c_str(),
+            audioUrl.empty() ? "(none)" : audioUrl.c_str());
+
+    // Free previous URLs and store new ones
+    if (g_current_video_url) {
+      free(g_current_video_url);
+      g_current_video_url = nullptr;
+    }
+    if (g_current_audio_url) {
+      free(g_current_audio_url);
+      g_current_audio_url = nullptr;
+    }
+    if (!videoUrl.empty()) {
+      g_current_video_url = strdup(videoUrl.c_str());
+    }
+    if (!audioUrl.empty()) {
+      g_current_audio_url = strdup(audioUrl.c_str());
+    }
+
+    // Create dialog
     GtkWidget *dialog = gtk_dialog_new_with_buttons(
-        "Nội dung bài học", GTK_WINDOW(window), GTK_DIALOG_MODAL, "Đóng",
+        title.c_str(), GTK_WINDOW(window), GTK_DIALOG_MODAL, "Đóng",
         GTK_RESPONSE_CLOSE, NULL);
-    gtk_window_set_default_size(GTK_WINDOW(dialog), 600, 500);
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 650, 550);
+
+    GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    GtkWidget *main_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_container_set_border_width(GTK_CONTAINER(main_vbox), 10);
+    gtk_box_pack_start(GTK_BOX(content_area), main_vbox, TRUE, TRUE, 0);
+
+    // Media buttons frame
+    bool hasVideo = !videoUrl.empty();
+    bool hasAudio = !audioUrl.empty();
+
+    if (hasVideo || hasAudio) {
+      GtkWidget *media_frame = gtk_frame_new("Media");
+      gtk_box_pack_start(GTK_BOX(main_vbox), media_frame, FALSE, FALSE, 0);
+
+      GtkWidget *media_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+      gtk_container_set_border_width(GTK_CONTAINER(media_box), 10);
+      gtk_container_add(GTK_CONTAINER(media_frame), media_box);
+
+      // Video button
+      if (hasVideo) {
+        GtkWidget *btn_video = gtk_button_new_with_label("Play Video");
+        GtkWidget *video_icon = gtk_image_new_from_icon_name(
+            "video-x-generic", GTK_ICON_SIZE_BUTTON);
+        gtk_button_set_image(GTK_BUTTON(btn_video), video_icon);
+        gtk_button_set_always_show_image(GTK_BUTTON(btn_video), TRUE);
+        g_signal_connect(btn_video, "clicked",
+                         G_CALLBACK(on_play_video_clicked),
+                         (gpointer)g_current_video_url);
+        gtk_box_pack_start(GTK_BOX(media_box), btn_video, FALSE, FALSE, 0);
+      }
+
+      // Audio button
+      if (hasAudio) {
+        GtkWidget *btn_audio = gtk_button_new_with_label("Play Audio");
+        GtkWidget *audio_icon = gtk_image_new_from_icon_name(
+            "audio-x-generic", GTK_ICON_SIZE_BUTTON);
+        gtk_button_set_image(GTK_BUTTON(btn_audio), audio_icon);
+        gtk_button_set_always_show_image(GTK_BUTTON(btn_audio), TRUE);
+        g_signal_connect(btn_audio, "clicked",
+                         G_CALLBACK(on_play_audio_clicked),
+                         (gpointer)g_current_audio_url);
+        gtk_box_pack_start(GTK_BOX(media_box), btn_audio, FALSE, FALSE, 0);
+      }
+
+      // Media status label
+      std::string mediaInfo = "";
+      if (hasVideo)
+        mediaInfo += "Video available  ";
+      if (hasAudio)
+        mediaInfo += "Audio available";
+      GtkWidget *lbl_media = gtk_label_new(mediaInfo.c_str());
+      gtk_box_pack_end(GTK_BOX(media_box), lbl_media, FALSE, FALSE, 0);
+    }
+
+    // Text content in scrolled window
+    GtkWidget *text_frame = gtk_frame_new("Nội dung bài học");
+    gtk_box_pack_start(GTK_BOX(main_vbox), text_frame, TRUE, TRUE, 0);
 
     GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
-    gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dialog))),
-                       scroll, TRUE, TRUE, 0);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_container_add(GTK_CONTAINER(text_frame), scroll);
 
     GtkWidget *tv = gtk_text_view_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(tv), FALSE);
     gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(tv), GTK_WRAP_WORD);
-    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(tv), 20);
-    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(tv), 20);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(tv), 15);
+    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(tv), 15);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(tv), 10);
+    gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(tv), 10);
 
     GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv));
     gtk_text_buffer_set_text(buffer, content.c_str(), -1);
