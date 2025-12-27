@@ -2859,6 +2859,127 @@ std::string handleGetFeedback(const std::string& json) {
            R"(,"payload":{"status":"error","message":"Submission not found"}}})";
 }
 
+// Xử lý GET_USER_SUBMISSIONS_REQUEST (Student views all their submissions with feedback)
+std::string handleGetUserSubmissions(const std::string& json) {
+    std::string messageId = getJsonValue(json, "messageId");
+    std::string sessionToken = getJsonValue(json, "sessionToken");
+
+    std::string userId = validateSession(sessionToken);
+    if (userId.empty()) {
+        return R"({"messageType":"GET_USER_SUBMISSIONS_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Invalid or expired session"}})";
+    }
+
+    std::string submissionsJson = "[";
+    bool first = true;
+
+    {
+        std::lock_guard<std::mutex> lock(exercisesMutex);
+        for (const auto& submission : exerciseSubmissions) {
+            if (submission.userId == userId) {
+                if (!first) submissionsJson += ",";
+                first = false;
+
+                // Get exercise title
+                std::string exerciseTitle = "Unknown Exercise";
+                auto exIt = exercises.find(submission.exerciseId);
+                if (exIt != exercises.end()) {
+                    exerciseTitle = exIt->second.title;
+                }
+
+                // Get teacher name if reviewed
+                std::string teacherName = "";
+                if (submission.status == "reviewed" && !submission.teacherId.empty()) {
+                    std::lock_guard<std::mutex> userLock(usersMutex);
+                    auto it = userById.find(submission.teacherId);
+                    if (it != userById.end()) {
+                        teacherName = it->second->fullname;
+                    }
+                }
+
+                submissionsJson += R"({"submissionId":")" + submission.submissionId +
+                                   R"(","exerciseId":")" + submission.exerciseId +
+                                   R"(","exerciseTitle":")" + escapeJson(exerciseTitle) +
+                                   R"(","exerciseType":")" + submission.exerciseType +
+                                   R"(","status":")" + submission.status +
+                                   R"(","submittedAt":)" + std::to_string(submission.submittedAt);
+
+                if (submission.status == "reviewed") {
+                    submissionsJson += R"(,"teacherId":")" + submission.teacherId +
+                                       R"(","teacherName":")" + escapeJson(teacherName) +
+                                       R"(","feedback":")" + escapeJson(submission.teacherFeedback) +
+                                       R"(","score":)" + std::to_string(submission.teacherScore) +
+                                       R"(,"reviewedAt":)" + std::to_string(submission.reviewedAt);
+                }
+                submissionsJson += "}";
+            }
+        }
+    }
+    submissionsJson += "]";
+
+    return R"({"messageType":"GET_USER_SUBMISSIONS_RESPONSE","messageId":")" + messageId +
+           R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+           R"(,"payload":{"status":"success","submissions":)" + submissionsJson + R"(}})";
+}
+
+// Xử lý GET_PENDING_REVIEWS_REQUEST (Teacher views submissions pending review)
+std::string handleGetPendingReviews(const std::string& json) {
+    std::string messageId = getJsonValue(json, "messageId");
+    std::string sessionToken = getJsonValue(json, "sessionToken");
+
+    std::string userId = validateSession(sessionToken);
+    if (userId.empty() || !isTeacher(userId)) {
+        return R"({"messageType":"GET_PENDING_REVIEWS_RESPONSE","messageId":")" + messageId +
+               R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+               R"(,"payload":{"status":"error","message":"Unauthorized: Teacher access required"}})";
+    }
+
+    std::string submissionsJson = "[";
+    bool first = true;
+
+    {
+        std::lock_guard<std::mutex> lock(exercisesMutex);
+        for (const auto& submission : exerciseSubmissions) {
+            if (submission.status == "pending") {
+                if (!first) submissionsJson += ",";
+                first = false;
+
+                // Get exercise title
+                std::string exerciseTitle = "Unknown Exercise";
+                auto exIt = exercises.find(submission.exerciseId);
+                if (exIt != exercises.end()) {
+                    exerciseTitle = exIt->second.title;
+                }
+
+                // Get student name
+                std::string studentName = "Unknown";
+                {
+                    std::lock_guard<std::mutex> userLock(usersMutex);
+                    auto it = userById.find(submission.userId);
+                    if (it != userById.end()) {
+                        studentName = it->second->fullname;
+                    }
+                }
+
+                submissionsJson += R"({"submissionId":")" + submission.submissionId +
+                                   R"(","exerciseId":")" + submission.exerciseId +
+                                   R"(","exerciseTitle":")" + escapeJson(exerciseTitle) +
+                                   R"(","exerciseType":")" + submission.exerciseType +
+                                   R"(","studentId":")" + submission.userId +
+                                   R"(","studentName":")" + escapeJson(studentName) +
+                                   R"(","content":")" + escapeJson(submission.content) +
+                                   R"(","submittedAt":)" + std::to_string(submission.submittedAt) + "}";
+            }
+        }
+    }
+    submissionsJson += "]";
+
+    return R"({"messageType":"GET_PENDING_REVIEWS_RESPONSE","messageId":")" + messageId +
+           R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+           R"(,"payload":{"status":"success","submissions":)" + submissionsJson + R"(}})";
+}
+
 // Xử lý SET_LEVEL_REQUEST
 std::string handleSetLevel(const std::string& json) {
     std::string payload = getJsonObject(json, "payload");
@@ -3330,6 +3451,18 @@ void handleClient(int clientSocket, struct sockaddr_in clientAddr) {
         }
         else if (messageType == "SUBMIT_EXERCISE_REQUEST") {
             response = handleSubmitExercise(message);
+        }
+        else if (messageType == "GET_USER_SUBMISSIONS_REQUEST") {
+            response = handleGetUserSubmissions(message);
+        }
+        else if (messageType == "GET_FEEDBACK_REQUEST") {
+            response = handleGetFeedback(message);
+        }
+        else if (messageType == "GET_PENDING_REVIEWS_REQUEST") {
+            response = handleGetPendingReviews(message);
+        }
+        else if (messageType == "REVIEW_EXERCISE_REQUEST") {
+            response = handleReviewExercise(message);
         }
         else if (messageType == "GET_GAME_LIST_REQUEST") {
             response = handleGetGameList(message);

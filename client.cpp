@@ -480,10 +480,11 @@ void showMainMenu() {
     printColored("║  2. View All Lessons                     ║\n", "");
     printColored("║  3. Take a Test                          ║\n", "");
     printColored("║  4. Do Exercises                         ║\n", "");
-    printColored("║  5. Play Games                           ║\n", "");
-    printColored("║  6. Chat with Others                     ║\n", "");
-    printColored("║  7. Voice Call                           ║\n", "");
-    printColored("║  8. Logout                               ║\n", "");
+    printColored("║  5. View Teacher Feedback                ║\n", "");
+    printColored("║  6. Play Games                           ║\n", "");
+    printColored("║  7. Chat with Others                     ║\n", "");
+    printColored("║  8. Voice Call                           ║\n", "");
+    printColored("║  9. Logout                               ║\n", "");
     printColored("║  0. Exit                                 ║\n", "");
     printColored("╚══════════════════════════════════════════╝\n", "cyan");
 
@@ -1317,6 +1318,165 @@ void openChatWith(const std::string& recipientId, const std::string& recipientNa
         currentChatPartnerName = "";
     }
     inChatMode = false;
+}
+
+// ============================================================================
+// VIEW TEACHER FEEDBACK
+// ============================================================================
+
+void viewFeedback() {
+    clearScreen();
+    printColored("╔══════════════════════════════════════════╗\n", "cyan");
+    printColored("║         VIEW TEACHER FEEDBACK            ║\n", "cyan");
+    printColored("╚══════════════════════════════════════════╝\n", "cyan");
+
+    // Get all user submissions
+    std::string request = R"({"messageType":"GET_USER_SUBMISSIONS_REQUEST","messageId":")" + generateMessageId() +
+                          R"(","timestamp":)" + std::to_string(getCurrentTimestamp()) +
+                          R"(,"sessionToken":")" + sessionToken + R"(","payload":{}})";
+
+    std::string response = sendAndReceive(request);
+    if (response.empty()) {
+        printColored("\n[ERROR] No response from server\n", "red");
+        waitEnter();
+        return;
+    }
+
+    std::string status = getJsonValue(response, "status");
+    if (status != "success") {
+        std::string message = getJsonValue(response, "message");
+        printColored("\n[ERROR] " + message + "\n", "red");
+        waitEnter();
+        return;
+    }
+
+    // Parse submissions array
+    std::string payload = getJsonObject(response, "payload");
+    std::string submissionsStr = getJsonArray(payload, "submissions");
+
+    if (submissionsStr.empty() || submissionsStr == "[]") {
+        printColored("\nYou have no exercise submissions yet.\n", "yellow");
+        printColored("Complete some exercises first to see feedback!\n", "");
+        waitEnter();
+        return;
+    }
+
+    // Parse each submission
+    std::vector<std::map<std::string, std::string>> submissions;
+    int braceCount = 0;
+    size_t objStart = std::string::npos;
+
+    for (size_t i = 0; i < submissionsStr.length(); i++) {
+        if (submissionsStr[i] == '{') {
+            if (braceCount == 0) objStart = i;
+            braceCount++;
+        } else if (submissionsStr[i] == '}') {
+            braceCount--;
+            if (braceCount == 0 && objStart != std::string::npos) {
+                std::string obj = submissionsStr.substr(objStart, i - objStart + 1);
+                std::map<std::string, std::string> sub;
+                sub["submissionId"] = getJsonValue(obj, "submissionId");
+                sub["exerciseId"] = getJsonValue(obj, "exerciseId");
+                sub["exerciseTitle"] = getJsonValue(obj, "exerciseTitle");
+                sub["exerciseType"] = getJsonValue(obj, "exerciseType");
+                sub["status"] = getJsonValue(obj, "status");
+                sub["submittedAt"] = getJsonValue(obj, "submittedAt");
+                sub["teacherName"] = getJsonValue(obj, "teacherName");
+                sub["feedback"] = getJsonValue(obj, "feedback");
+                sub["score"] = getJsonValue(obj, "score");
+                sub["reviewedAt"] = getJsonValue(obj, "reviewedAt");
+                submissions.push_back(sub);
+                objStart = std::string::npos;
+            }
+        }
+    }
+
+    if (submissions.empty()) {
+        printColored("\nNo submissions found.\n", "yellow");
+        waitEnter();
+        return;
+    }
+
+    // Display submissions
+    printColored("\nYour Exercise Submissions:\n\n", "green");
+
+    for (size_t i = 0; i < submissions.size(); i++) {
+        const auto& sub = submissions[i];
+        printColored("─────────────────────────────────────────────\n", "cyan");
+        printColored("[" + std::to_string(i + 1) + "] ", "yellow");
+        printColored(sub.at("exerciseTitle"), "white");
+        printColored(" (" + sub.at("exerciseType") + ")\n", "");
+
+        // Format submission date
+        int64_t submittedTs = std::stoll(sub.at("submittedAt"));
+        time_t submittedTime = submittedTs;
+        char timeBuf[64];
+        strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M", localtime(&submittedTime));
+        printColored("   Submitted: ", "");
+        printColored(std::string(timeBuf) + "\n", "");
+
+        if (sub.at("status") == "reviewed") {
+            printColored("   Status: ", "");
+            printColored("REVIEWED\n", "green");
+
+            printColored("   Score: ", "");
+            int score = std::stoi(sub.at("score"));
+            if (score >= 80) {
+                printColored(std::to_string(score) + "/100", "green");
+            } else if (score >= 50) {
+                printColored(std::to_string(score) + "/100", "yellow");
+            } else {
+                printColored(std::to_string(score) + "/100", "red");
+            }
+            printColored("\n", "");
+
+            printColored("   Teacher: ", "");
+            printColored(sub.at("teacherName") + "\n", "cyan");
+
+            printColored("   Feedback: ", "");
+            printColored(sub.at("feedback") + "\n", "white");
+
+            // Format review date
+            if (!sub.at("reviewedAt").empty() && sub.at("reviewedAt") != "0") {
+                int64_t reviewedTs = std::stoll(sub.at("reviewedAt"));
+                time_t reviewedTime = reviewedTs;
+                strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M", localtime(&reviewedTime));
+                printColored("   Reviewed: ", "");
+                printColored(std::string(timeBuf) + "\n", "");
+            }
+        } else {
+            printColored("   Status: ", "");
+            printColored("PENDING REVIEW\n", "yellow");
+            printColored("   (Waiting for teacher feedback)\n", "");
+        }
+    }
+    printColored("─────────────────────────────────────────────\n", "cyan");
+
+    // Summary
+    int reviewed = 0, pending = 0;
+    int totalScore = 0;
+    for (const auto& sub : submissions) {
+        if (sub.at("status") == "reviewed") {
+            reviewed++;
+            totalScore += std::stoi(sub.at("score"));
+        } else {
+            pending++;
+        }
+    }
+
+    printColored("\n══════════ SUMMARY ══════════\n", "magenta");
+    printColored("Total Submissions: " + std::to_string(submissions.size()) + "\n", "");
+    printColored("Reviewed: " + std::to_string(reviewed) + "\n", "green");
+    printColored("Pending: " + std::to_string(pending) + "\n", "yellow");
+    if (reviewed > 0) {
+        double avgScore = static_cast<double>(totalScore) / reviewed;
+        char avgBuf[16];
+        snprintf(avgBuf, sizeof(avgBuf), "%.1f", avgScore);
+        printColored("Average Score: " + std::string(avgBuf) + "/100\n", "cyan");
+    }
+    printColored("═════════════════════════════\n", "magenta");
+
+    waitEnter();
 }
 
 // ============================================================================
@@ -2162,12 +2322,14 @@ int main_cli(int argc, char* argv[]) {
         } else if (input == "4") {
             doExercises();
         } else if (input == "5") {
-            playGames();
+            viewFeedback();
         } else if (input == "6") {
-            chat();
+            playGames();
         } else if (input == "7") {
-            voiceCall();
+            chat();
         } else if (input == "8") {
+            voiceCall();
+        } else if (input == "9") {
             loggedIn = false;
             sessionToken = "";
             currentUserId = "";

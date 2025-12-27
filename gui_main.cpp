@@ -1607,6 +1607,217 @@ static void on_voice_call_button_clicked(GtkWidget *widget, gpointer data) {
   }
 }
 
+// ============================================================================
+// VIEW TEACHER FEEDBACK DIALOG
+// ============================================================================
+
+void show_feedback_dialog() {
+  // Send request to get user submissions
+  std::string jsonRequest =
+      "{\"messageType\":\"GET_USER_SUBMISSIONS_REQUEST\", \"sessionToken\":\"" +
+      sessionToken + "\", \"payload\":{}}";
+
+  GtkWidget *loading =
+      gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO,
+                             GTK_BUTTONS_NONE, "Đang tải phản hồi...");
+  gtk_widget_show_now(loading);
+  while (gtk_events_pending())
+    gtk_main_iteration();
+
+  if (!sendMessage(jsonRequest)) {
+    gtk_widget_destroy(loading);
+    GtkWidget *error =
+        gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+                               GTK_BUTTONS_OK, "Không thể kết nối đến server");
+    gtk_dialog_run(GTK_DIALOG(error));
+    gtk_widget_destroy(error);
+    return;
+  }
+
+  std::string response = waitForResponse(5000);
+  gtk_widget_destroy(loading);
+
+  if (response.empty() || response.find("\"status\":\"success\"") == std::string::npos) {
+    GtkWidget *error =
+        gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+                               GTK_BUTTONS_OK, "Không thể tải phản hồi");
+    gtk_dialog_run(GTK_DIALOG(error));
+    gtk_widget_destroy(error);
+    return;
+  }
+
+  // Create feedback dialog
+  GtkWidget *dialog = gtk_dialog_new_with_buttons(
+      "Xem phản hồi từ giáo viên", GTK_WINDOW(window), GTK_DIALOG_MODAL,
+      "Đóng", GTK_RESPONSE_CLOSE, NULL);
+  gtk_window_set_default_size(GTK_WINDOW(dialog), 600, 500);
+
+  GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+  GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled),
+                                 GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+  gtk_box_pack_start(GTK_BOX(content), scrolled, TRUE, TRUE, 5);
+
+  GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+  gtk_container_set_border_width(GTK_CONTAINER(vbox), 10);
+  gtk_container_add(GTK_CONTAINER(scrolled), vbox);
+
+  GtkWidget *title = gtk_label_new(NULL);
+  gtk_label_set_markup(GTK_LABEL(title),
+                       "<b><big>Bài tập đã nộp và phản hồi</big></b>");
+  gtk_box_pack_start(GTK_BOX(vbox), title, FALSE, FALSE, 10);
+
+  // Parse submissions from response
+  int submissionCount = 0;
+  int reviewedCount = 0;
+  int totalScore = 0;
+
+  // Find submissions array
+  size_t arrStart = response.find("\"submissions\":[");
+  if (arrStart == std::string::npos) {
+    GtkWidget *noData = gtk_label_new("Chưa có bài tập nào được nộp.");
+    gtk_box_pack_start(GTK_BOX(vbox), noData, FALSE, FALSE, 20);
+  } else {
+    arrStart += 15;
+    size_t arrEnd = response.find("]", arrStart);
+    std::string submissionsStr = response.substr(arrStart, arrEnd - arrStart);
+
+    // Parse each submission object
+    int braceCount = 0;
+    size_t objStart = std::string::npos;
+
+    for (size_t i = 0; i < submissionsStr.length(); i++) {
+      if (submissionsStr[i] == '{') {
+        if (braceCount == 0) objStart = i;
+        braceCount++;
+      } else if (submissionsStr[i] == '}') {
+        braceCount--;
+        if (braceCount == 0 && objStart != std::string::npos) {
+          std::string obj = submissionsStr.substr(objStart, i - objStart + 1);
+          submissionCount++;
+
+          // Extract fields using regex
+          std::string exerciseTitle = "";
+          std::string status = "";
+          std::string teacherName = "";
+          std::string feedback = "";
+          std::string scoreStr = "";
+          std::string exerciseType = "";
+
+          std::regex re_title("\"exerciseTitle\"\\s*:\\s*\"([^\"]+)\"");
+          std::regex re_status("\"status\"\\s*:\\s*\"([^\"]+)\"");
+          std::regex re_teacher("\"teacherName\"\\s*:\\s*\"([^\"]+)\"");
+          std::regex re_feedback("\"feedback\"\\s*:\\s*\"([^\"]+)\"");
+          std::regex re_score("\"score\"\\s*:\\s*(\\d+)");
+          std::regex re_type("\"exerciseType\"\\s*:\\s*\"([^\"]+)\"");
+          std::smatch match;
+
+          if (std::regex_search(obj, match, re_title) && match.size() > 1)
+            exerciseTitle = match.str(1);
+          if (std::regex_search(obj, match, re_status) && match.size() > 1)
+            status = match.str(1);
+          if (std::regex_search(obj, match, re_teacher) && match.size() > 1)
+            teacherName = match.str(1);
+          if (std::regex_search(obj, match, re_feedback) && match.size() > 1)
+            feedback = match.str(1);
+          if (std::regex_search(obj, match, re_score) && match.size() > 1)
+            scoreStr = match.str(1);
+          if (std::regex_search(obj, match, re_type) && match.size() > 1)
+            exerciseType = match.str(1);
+
+          // Create frame for this submission
+          GtkWidget *frame = gtk_frame_new(NULL);
+          gtk_frame_set_shadow_type(GTK_FRAME(frame), GTK_SHADOW_ETCHED_IN);
+          gtk_box_pack_start(GTK_BOX(vbox), frame, FALSE, FALSE, 5);
+
+          GtkWidget *frameBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+          gtk_container_set_border_width(GTK_CONTAINER(frameBox), 10);
+          gtk_container_add(GTK_CONTAINER(frame), frameBox);
+
+          // Exercise title
+          std::string titleMarkup = "<b>" + exerciseTitle + "</b> (" + exerciseType + ")";
+          GtkWidget *lblTitle = gtk_label_new(NULL);
+          gtk_label_set_markup(GTK_LABEL(lblTitle), titleMarkup.c_str());
+          gtk_widget_set_halign(lblTitle, GTK_ALIGN_START);
+          gtk_box_pack_start(GTK_BOX(frameBox), lblTitle, FALSE, FALSE, 0);
+
+          if (status == "reviewed") {
+            reviewedCount++;
+            int score = scoreStr.empty() ? 0 : std::stoi(scoreStr);
+            totalScore += score;
+
+            // Score with color
+            std::string scoreColor = score >= 80 ? "green" : (score >= 50 ? "orange" : "red");
+            std::string scoreMarkup = "<span foreground='" + scoreColor + "'><b>Điểm: " +
+                                      std::to_string(score) + "/100</b></span>";
+            GtkWidget *lblScore = gtk_label_new(NULL);
+            gtk_label_set_markup(GTK_LABEL(lblScore), scoreMarkup.c_str());
+            gtk_widget_set_halign(lblScore, GTK_ALIGN_START);
+            gtk_box_pack_start(GTK_BOX(frameBox), lblScore, FALSE, FALSE, 0);
+
+            // Teacher name
+            std::string teacherMarkup = "Giáo viên: <i>" + teacherName + "</i>";
+            GtkWidget *lblTeacher = gtk_label_new(NULL);
+            gtk_label_set_markup(GTK_LABEL(lblTeacher), teacherMarkup.c_str());
+            gtk_widget_set_halign(lblTeacher, GTK_ALIGN_START);
+            gtk_box_pack_start(GTK_BOX(frameBox), lblTeacher, FALSE, FALSE, 0);
+
+            // Feedback
+            GtkWidget *lblFeedbackTitle = gtk_label_new(NULL);
+            gtk_label_set_markup(GTK_LABEL(lblFeedbackTitle), "<b>Nhận xét:</b>");
+            gtk_widget_set_halign(lblFeedbackTitle, GTK_ALIGN_START);
+            gtk_box_pack_start(GTK_BOX(frameBox), lblFeedbackTitle, FALSE, FALSE, 0);
+
+            GtkWidget *lblFeedback = gtk_label_new(feedback.c_str());
+            gtk_label_set_line_wrap(GTK_LABEL(lblFeedback), TRUE);
+            gtk_label_set_max_width_chars(GTK_LABEL(lblFeedback), 70);
+            gtk_widget_set_halign(lblFeedback, GTK_ALIGN_START);
+            gtk_box_pack_start(GTK_BOX(frameBox), lblFeedback, FALSE, FALSE, 0);
+          } else {
+            // Pending status
+            GtkWidget *lblPending = gtk_label_new(NULL);
+            gtk_label_set_markup(GTK_LABEL(lblPending),
+                                 "<span foreground='orange'><b>Đang chờ giáo viên chấm điểm...</b></span>");
+            gtk_widget_set_halign(lblPending, GTK_ALIGN_START);
+            gtk_box_pack_start(GTK_BOX(frameBox), lblPending, FALSE, FALSE, 0);
+          }
+
+          objStart = std::string::npos;
+        }
+      }
+    }
+
+    if (submissionCount == 0) {
+      GtkWidget *noData = gtk_label_new("Chưa có bài tập nào được nộp.");
+      gtk_box_pack_start(GTK_BOX(vbox), noData, FALSE, FALSE, 20);
+    }
+  }
+
+  // Summary section
+  GtkWidget *separator = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+  gtk_box_pack_start(GTK_BOX(vbox), separator, FALSE, FALSE, 10);
+
+  std::string summaryMarkup = "<b>Tổng kết:</b>\n";
+  summaryMarkup += "Tổng số bài nộp: " + std::to_string(submissionCount) + "\n";
+  summaryMarkup += "Đã chấm điểm: " + std::to_string(reviewedCount) + "\n";
+  summaryMarkup += "Đang chờ: " + std::to_string(submissionCount - reviewedCount);
+  if (reviewedCount > 0) {
+    double avgScore = static_cast<double>(totalScore) / reviewedCount;
+    char avgBuf[16];
+    snprintf(avgBuf, sizeof(avgBuf), "%.1f", avgScore);
+    summaryMarkup += "\nĐiểm trung bình: " + std::string(avgBuf) + "/100";
+  }
+
+  GtkWidget *lblSummary = gtk_label_new(NULL);
+  gtk_label_set_markup(GTK_LABEL(lblSummary), summaryMarkup.c_str());
+  gtk_widget_set_halign(lblSummary, GTK_ALIGN_START);
+  gtk_box_pack_start(GTK_BOX(vbox), lblSummary, FALSE, FALSE, 10);
+
+  gtk_widget_show_all(dialog);
+  gtk_dialog_run(GTK_DIALOG(dialog));
+  gtk_widget_destroy(dialog);
+}
+
 void show_voice_call_dialog() {
   // Get online contacts
   std::string jsonRequest =
@@ -1734,6 +1945,9 @@ void on_menu_btn_clicked(GtkWidget *widget, gpointer data) {
     show_voice_call_dialog();
     break;
   case 6:
+    show_feedback_dialog();
+    break;
+  case 7:
     gtk_main_quit();
     break;
   }
@@ -1755,8 +1969,9 @@ void show_main_menu() {
   gtk_box_pack_start(GTK_BOX(vbox_menu), lbl, FALSE, FALSE, 10);
 
   const char *buttons[] = {"1. Chọn cấp độ", "2. Học bài", "3. Làm bài thi",
-                           "4. Chat",        "5. Game",    "6. Voice Call", "Thoát"};
-  for (int i = 0; i < 7; i++) {
+                           "4. Chat",        "5. Game",    "6. Voice Call",
+                           "7. Xem phản hồi", "Thoát"};
+  for (int i = 0; i < 8; i++) {
     GtkWidget *btn = gtk_button_new_with_label(buttons[i]);
     g_signal_connect(btn, "clicked", G_CALLBACK(on_menu_btn_clicked),
                      GINT_TO_POINTER(i));
