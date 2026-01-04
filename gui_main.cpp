@@ -1,4 +1,5 @@
 #include "client_bridge.h"
+#include "src/audio/audio_streamer.h" // Include AudioStreamer
 #include <algorithm>
 #include <cstring>
 #include <gtk/gtk.h>
@@ -12,6 +13,9 @@
 
 // Forward declaration for chat conversation handler (after including gtk)
 static void on_open_conversation_clicked(GtkWidget *widget, gpointer data);
+// Forward declarations for voice call callbacks
+static void on_incoming_call_accept(GtkWidget *widget, gpointer data);
+static void on_incoming_call_reject(GtkWidget *widget, gpointer data);
 
 // =========================================================
 // 1. BIẾN TOÀN CỤC & CẤU TRÚC DỮ LIỆU
@@ -19,6 +23,10 @@ static void on_open_conversation_clicked(GtkWidget *widget, gpointer data);
 
 // Widget cơ bản
 GtkWidget *window;
+GtkWidget *outgoingCallDialog =
+    nullptr; // Global pointer for managing calling state dialog
+GtkWidget *incomingCallDialog =
+    nullptr; // Global pointer for incoming call notification
 GtkWidget *vbox_login;
 GtkWidget *entry_email;
 GtkWidget *entry_password;
@@ -31,6 +39,7 @@ GtkWidget *entry_chat_user;
 // Dữ liệu phiên bản
 extern std::string sessionToken;
 extern std::string currentLevel;
+AudioStreamer g_audio_streamer; // Global streamer instance
 
 // Cấu trúc câu hỏi thi
 struct Question {
@@ -124,26 +133,65 @@ static void play_video(const std::string &url) {
 
   g_print("[VIDEO] Playing: %s\n", url.c_str());
 
-  // Use xdg-open for URLs (opens default browser for YouTube, etc.)
-  // Use mpv or vlc for local files
+  // 1. Try wslview (from wslu package) - Best for WSL
+  // 2. Try cmd.exe /C start (Direct Windows call)
+  // 3. Fallback to Linux primitives
   std::string command;
+
   if (url.find("http://") == 0 || url.find("https://") == 0) {
-    command = "xdg-open \"" + url + "\" &";
+    // Escape for shell
+    std::string safeUrl = url; // In prod, do proper escaping
+    command = "(which wslview && wslview \"" + safeUrl +
+              "\") || "
+              "(cmd.exe /C start \"\" \"" +
+              safeUrl +
+              "\" 2>/dev/null) || "
+              "xdg-open \"" +
+              safeUrl + "\" &";
   } else {
-    // Local file - try mpv first, then vlc, then xdg-open
-    command = "(which mpv && mpv --no-terminal \"" + url +
-              "\") || (which vlc && vlc \"" + url +
-              "\") || xdg-open \"" + url + "\" &";
+    // Local file
+    command = "(which wslview && wslview \"" + url +
+              "\") || "
+              "(cmd.exe /C start \"\" \"" +
+              url +
+              "\" 2>/dev/null) || "
+              "(which mpv && mpv --no-terminal \"" +
+              url +
+              "\") || "
+              "xdg-open \"" +
+              url + "\" &";
   }
 
   int result = system(command.c_str());
   if (result != 0) {
-    GtkWidget *msg = gtk_message_dialog_new(
-        NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-        "Failed to play video.\nURL: %s", url.c_str());
-    gtk_dialog_run(GTK_DIALOG(msg));
-    gtk_widget_destroy(msg);
+    // Silent fail is common with cmd.exe return codes in WSL, so we don't
+    // always popup error
+    g_print("[WARN] System command returned %d\n", result);
   }
+}
+
+// Helper to convert WSL path to Windows path using wslpath
+static std::string wsl_to_windows_path(const std::string &path) {
+  if (path.empty() || path[0] != '/')
+    return path; // Not an absolute Linux path
+
+  char buffer[1024];
+  std::string cmd = "wslpath -w \"" + path + "\"";
+  FILE *pipe = popen(cmd.c_str(), "r");
+  if (!pipe)
+    return path;
+
+  if (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+    std::string winPath = buffer;
+    // Remove trailing newline
+    if (!winPath.empty() && winPath.back() == '\n') {
+      winPath.pop_back();
+    }
+    pclose(pipe);
+    return winPath;
+  }
+  pclose(pipe);
+  return path;
 }
 
 // Play audio using available audio players
@@ -159,27 +207,54 @@ static void play_audio(const std::string &url) {
 
   g_print("[AUDIO] Playing: %s\n", url.c_str());
 
+  std::string target = url;
+
+  // If local file in WSL, convert path
+  if (url.find("http") != 0 && url[0] == '/') {
+    target = wsl_to_windows_path(url);
+    g_print("[AUDIO] Converted path: %s\n", target.c_str());
+  }
+
+  // Escape backslashes for shell command if it's a Windows path
+  if (target.find("\\") != std::string::npos) {
+    std::string escaped;
+    for (char c : target) {
+      if (c == '\\')
+        escaped += "\\\\";
+      else
+        escaped += c;
+    }
+    target = escaped;
+  }
+
   std::string command;
   if (url.find("http://") == 0 || url.find("https://") == 0) {
-    // For URLs, use mpv or vlc (audio-only mode)
-    command = "(which mpv && mpv --no-video --no-terminal \"" + url +
-              "\") || (which vlc && cvlc --play-and-exit \"" + url +
-              "\") || xdg-open \"" + url + "\" &";
+    command = "(which wslview && wslview \"" + url +
+              "\") || "
+              "(cmd.exe /C start \"\" \"" +
+              url +
+              "\" 2>/dev/null) || "
+              "(which mpv && mpv --no-video --no-terminal \"" +
+              url +
+              "\") || "
+              "xdg-open \"" +
+              url + "\" &";
   } else {
-    // Local file - try paplay (PulseAudio), aplay, mpv, or vlc
-    command = "(which paplay && paplay \"" + url +
-              "\") || (which aplay && aplay \"" + url +
-              "\") || (which mpv && mpv --no-video --no-terminal \"" + url +
-              "\") || (which vlc && cvlc --play-and-exit \"" + url + "\") &";
+    command = "(which wslview && wslview \"" + target +
+              "\") || "
+              "(cmd.exe /C start \"\" \"" +
+              target +
+              "\" 2>/dev/null) || "
+              "(which paplay && paplay \"" +
+              url +
+              "\") || "
+              "(which aplay && aplay \"" +
+              url + "\") &";
   }
 
   int result = system(command.c_str());
   if (result != 0) {
-    GtkWidget *msg = gtk_message_dialog_new(
-        NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-        "Failed to play audio.\nFile: %s", url.c_str());
-    gtk_dialog_run(GTK_DIALOG(msg));
-    gtk_widget_destroy(msg);
+    g_print("[WARN] System command returned %d\n", result);
   }
 }
 
@@ -207,14 +282,15 @@ static void on_play_audio_clicked(GtkWidget *widget, gpointer data) {
 struct PictureMatchState {
   GtkWidget *dialog;
   GtkWidget *grid;
-  std::vector<GtkWidget *> imageButtons;  // Image buttons (left side)
-  std::vector<GtkWidget *> wordButtons;   // Word buttons (right side)
-  std::vector<std::pair<std::string, std::string>> pairs;  // (word, imageSource)
-  int selectedImageIndex;      // Currently selected image (-1 = none)
-  int selectedWordIndex;       // Currently selected word (-1 = none)
-  std::vector<bool> matchedImages;  // Which images have been matched
-  std::vector<bool> matchedWords;   // Which words have been matched
-  std::vector<std::pair<int, int>> matches;  // Recorded matches (image_idx, word_idx)
+  std::vector<GtkWidget *> imageButtons; // Image buttons (left side)
+  std::vector<GtkWidget *> wordButtons;  // Word buttons (right side)
+  std::vector<std::pair<std::string, std::string>> pairs; // (word, imageSource)
+  int selectedImageIndex;          // Currently selected image (-1 = none)
+  int selectedWordIndex;           // Currently selected word (-1 = none)
+  std::vector<bool> matchedImages; // Which images have been matched
+  std::vector<bool> matchedWords;  // Which words have been matched
+  std::vector<std::pair<int, int>>
+      matches; // Recorded matches (image_idx, word_idx)
   std::string gameSessionId;
   std::string gameId;
   int correctMatches;
@@ -263,8 +339,8 @@ static void parse_hex_color(const std::string &hexColor, double &r, double &g,
 
 // Create a placeholder pixbuf with color and emoji using Cairo
 static GdkPixbuf *create_placeholder_pixbuf(const std::string &color,
-                                            const std::string &emoji,
-                                            int width, int height) {
+                                            const std::string &emoji, int width,
+                                            int height) {
   // Create Cairo surface
   cairo_surface_t *surface =
       cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
@@ -319,7 +395,8 @@ static GdkPixbuf *create_placeholder_pixbuf(const std::string &color,
   int stride = cairo_image_surface_get_stride(surface);
 
   // Create pixbuf from Cairo data (ARGB -> RGBA conversion)
-  GdkPixbuf *pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, width, height);
+  GdkPixbuf *pixbuf =
+      gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, width, height);
   guchar *pixels = gdk_pixbuf_get_pixels(pixbuf);
   int rowstride = gdk_pixbuf_get_rowstride(pixbuf);
 
@@ -328,10 +405,10 @@ static GdkPixbuf *create_placeholder_pixbuf(const std::string &color,
       unsigned char *src = data + row * stride + col * 4;
       guchar *dst = pixels + row * rowstride + col * 4;
       // Cairo uses BGRA, GdkPixbuf uses RGBA
-      dst[0] = src[2];  // R
-      dst[1] = src[1];  // G
-      dst[2] = src[0];  // B
-      dst[3] = src[3];  // A
+      dst[0] = src[2]; // R
+      dst[1] = src[1]; // G
+      dst[2] = src[0]; // B
+      dst[3] = src[3]; // A
     }
   }
 
@@ -384,9 +461,14 @@ static void on_pm_image_clicked(GtkWidget *widget, gpointer data) {
 
   // Deselect previous selection
   if (g_pm_state->selectedImageIndex >= 0) {
-    GtkWidget *prevBtn = g_pm_state->imageButtons[g_pm_state->selectedImageIndex];
-    GtkStyleContext *prevCtx = gtk_widget_get_style_context(prevBtn);
-    gtk_style_context_remove_class(prevCtx, "selected");
+    if (g_pm_state->selectedImageIndex < (int)g_pm_state->imageButtons.size()) {
+      GtkWidget *prevBtn =
+          g_pm_state->imageButtons[g_pm_state->selectedImageIndex];
+      if (prevBtn) {
+        GtkStyleContext *prevCtx = gtk_widget_get_style_context(prevBtn);
+        gtk_style_context_remove_class(prevCtx, "selected");
+      }
+    }
   }
 
   // Select this image
@@ -441,9 +523,14 @@ static void on_pm_word_clicked(GtkWidget *widget, gpointer data) {
 
   // Deselect previous selection
   if (g_pm_state->selectedWordIndex >= 0) {
-    GtkWidget *prevBtn = g_pm_state->wordButtons[g_pm_state->selectedWordIndex];
-    GtkStyleContext *prevCtx = gtk_widget_get_style_context(prevBtn);
-    gtk_style_context_remove_class(prevCtx, "selected");
+    if (g_pm_state->selectedWordIndex < (int)g_pm_state->wordButtons.size()) {
+      GtkWidget *prevBtn =
+          g_pm_state->wordButtons[g_pm_state->selectedWordIndex];
+      if (prevBtn) {
+        GtkStyleContext *prevCtx = gtk_widget_get_style_context(prevBtn);
+        gtk_style_context_remove_class(prevCtx, "selected");
+      }
+    }
   }
 
   // Select this word
@@ -485,45 +572,129 @@ static void on_pm_word_clicked(GtkWidget *widget, gpointer data) {
   }
 }
 
+// --- Drag and Drop Handlers ---
+
+// Source (Image) sends data
+static void on_drag_data_get(GtkWidget *widget, GdkDragContext *context,
+                             GtkSelectionData *data, guint info, guint time,
+                             gpointer user_data) {
+  int imageIndex = GPOINTER_TO_INT(user_data);
+  // Send the image index as text
+  std::string text = std::to_string(imageIndex);
+  gtk_selection_data_set_text(data, text.c_str(), text.length());
+}
+
+// Destination (Word) receives data
+static void on_drag_data_received(GtkWidget *widget, GdkDragContext *context,
+                                  gint x, gint y, GtkSelectionData *data,
+                                  guint info, guint time, gpointer user_data) {
+  if (!g_pm_state)
+    return;
+
+  guchar *text = gtk_selection_data_get_text(data);
+  if (!text) {
+    gtk_drag_finish(context, FALSE, FALSE, time);
+    return;
+  }
+
+  int imageIndex = std::stoi(reinterpret_cast<const char *>(text));
+  int wordIndex = GPOINTER_TO_INT(user_data);
+  g_free(text);
+
+  // Validate indices
+  if (imageIndex < 0 || imageIndex >= (int)g_pm_state->matchedImages.size() ||
+      wordIndex < 0 || wordIndex >= (int)g_pm_state->matchedWords.size()) {
+    gtk_drag_finish(context, FALSE, FALSE, time);
+    return;
+  }
+
+  // Ignore if either is already matched
+  if (g_pm_state->matchedImages[imageIndex] ||
+      g_pm_state->matchedWords[wordIndex]) {
+    gtk_drag_finish(context, FALSE, FALSE, time);
+    return;
+  }
+
+  // Process Match
+  g_pm_state->matches.push_back({imageIndex, wordIndex});
+  g_pm_state->matchedImages[imageIndex] = true;
+  g_pm_state->matchedWords[wordIndex] = true;
+
+  // VISUAL UPDATE
+  GtkWidget *imgBtn = g_pm_state->imageButtons[imageIndex];
+  GtkWidget *wordBtn = g_pm_state->wordButtons[wordIndex];
+
+  // Remove selected class if they happened to be selected click-wise
+  gtk_style_context_remove_class(gtk_widget_get_style_context(imgBtn),
+                                 "selected");
+  gtk_style_context_remove_class(gtk_widget_get_style_context(wordBtn),
+                                 "selected");
+
+  // Add matched class
+  gtk_style_context_add_class(gtk_widget_get_style_context(imgBtn), "matched");
+  gtk_style_context_add_class(gtk_widget_get_style_context(wordBtn), "matched");
+
+  // Disable buttons
+  gtk_widget_set_sensitive(imgBtn, FALSE);
+  gtk_widget_set_sensitive(wordBtn, FALSE);
+
+  // Reset any click selections to avoid confusion
+  g_pm_state->selectedImageIndex = -1;
+  g_pm_state->selectedWordIndex = -1;
+
+  gtk_drag_finish(context, TRUE, FALSE, time);
+  g_print("[DND MATCH] Image %d matched with Word %d\n", imageIndex, wordIndex);
+}
+
 // Apply CSS styling for picture match game
 static void apply_pm_css() {
   GtkCssProvider *provider = gtk_css_provider_new();
-  const char *css =
-      ".pm-image-btn { "
-      "  padding: 8px; "
-      "  border-radius: 12px; "
-      "  background: #f8f9fa; "
-      "  border: 3px solid #dee2e6; "
-      "  transition: all 0.2s ease; "
-      "} "
-      ".pm-image-btn:hover { "
-      "  border-color: #6c757d; "
-      "  background: #e9ecef; "
-      "} "
-      ".pm-word-btn { "
-      "  padding: 12px 20px; "
-      "  font-size: 16px; "
-      "  font-weight: bold; "
-      "  border-radius: 8px; "
-      "  background: #e3f2fd; "
-      "  border: 2px solid #90caf9; "
-      "  color: #1565c0; "
-      "} "
-      ".pm-word-btn:hover { "
-      "  background: #bbdefb; "
-      "  border-color: #42a5f5; "
-      "} "
-      ".selected { "
-      "  border-color: #ff9800 !important; "
-      "  border-width: 4px !important; "
-      "  background: #fff3e0 !important; "
-      "  box-shadow: 0 0 10px rgba(255, 152, 0, 0.5); "
-      "} "
-      ".matched { "
-      "  border-color: #4caf50 !important; "
-      "  background: #e8f5e9 !important; "
-      "  opacity: 0.7; "
-      "} ";
+  const char *css = ".pm-image-btn { "
+                    "  padding: 8px; "
+                    "  border-radius: 12px; "
+                    "  background: #f8f9fa; "
+                    "  border: 3px solid #dee2e6; "
+                    "  transition: all 0.2s ease; "
+                    "} "
+                    ".pm-image-btn:hover { "
+                    "  border-color: #6c757d; "
+                    "  background: #e9ecef; "
+                    "} "
+                    ".pm-word-btn { "
+                    "  padding: 12px 20px; "
+                    "  font-size: 16px; "
+                    "  font-weight: bold; "
+                    "  border-radius: 8px; "
+                    "  background: #e3f2fd; "
+                    "  border: 2px solid #90caf9; "
+                    "  color: #1565c0; "
+                    "} "
+                    ".pm-word-btn:hover { "
+                    "  background: #bbdefb; "
+                    "  border-color: #42a5f5; "
+                    "} "
+                    ".text-match-btn { "
+                    "  padding: 12px 20px; "
+                    "  font-size: 16px; "
+                    "  border-radius: 8px; "
+                    "  background: #fff; "
+                    "  border: 2px solid #ddd; "
+                    "} "
+                    ".text-match-btn:hover { "
+                    "  border-color: #aaa; "
+                    "  background: #f5f5f5; "
+                    "} "
+                    ".selected { "
+                    "  border-color: #ff9800 !important; "
+                    "  border-width: 4px !important; "
+                    "  background: #fff3e0 !important; "
+                    "  box-shadow: 0 0 10px rgba(255, 152, 0, 0.5); "
+                    "} "
+                    ".matched { "
+                    "  border-color: #4caf50 !important; "
+                    "  background: #e8f5e9 !important; "
+                    "  opacity: 0.7; "
+                    "} ";
 
   gtk_css_provider_load_from_data(provider, css, -1, nullptr);
   gtk_style_context_add_provider_for_screen(
@@ -534,10 +705,8 @@ static void apply_pm_css() {
 
 // Show picture match game dialog with visual image tiles
 static void show_picture_match_game(
-    const std::string &gameTitle,
-    const std::string &gameSessionId,
-    const std::string &gameId,
-    const std::string &timeLimit,
+    const std::string &gameTitle, const std::string &gameSessionId,
+    const std::string &gameId, const std::string &timeLimit,
     const std::vector<std::pair<std::string, std::string>> &pairs) {
 
   // Apply CSS styles
@@ -557,10 +726,8 @@ static void show_picture_match_game(
 
   // Create dialog
   GtkWidget *dialog = gtk_dialog_new_with_buttons(
-      gameTitle.c_str(), GTK_WINDOW(window), GTK_DIALOG_MODAL,
-      "Hủy", GTK_RESPONSE_CLOSE,
-      "Nộp bài", GTK_RESPONSE_OK,
-      NULL);
+      gameTitle.c_str(), GTK_WINDOW(window), GTK_DIALOG_MODAL, "Hủy",
+      GTK_RESPONSE_CLOSE, "Nộp bài", GTK_RESPONSE_OK, NULL);
   gtk_window_set_default_size(GTK_WINDOW(dialog), 800, 600);
   g_pm_state->dialog = dialog;
 
@@ -572,8 +739,9 @@ static void show_picture_match_game(
   gtk_box_pack_start(GTK_BOX(content), headerBox, FALSE, FALSE, 0);
 
   GtkWidget *titleLabel = gtk_label_new(NULL);
-  gtk_label_set_markup(GTK_LABEL(titleLabel),
-                       "<span size='large' weight='bold'>🎮 PICTURE MATCHING GAME</span>");
+  gtk_label_set_markup(
+      GTK_LABEL(titleLabel),
+      "<span size='large' weight='bold'>🎮 PICTURE MATCHING GAME</span>");
   gtk_box_pack_start(GTK_BOX(headerBox), titleLabel, FALSE, FALSE, 0);
 
   std::string infoText = "Thời gian: " + timeLimit + "s | Ghép " +
@@ -581,8 +749,8 @@ static void show_picture_match_game(
   GtkWidget *infoLabel = gtk_label_new(infoText.c_str());
   gtk_box_pack_start(GTK_BOX(headerBox), infoLabel, FALSE, FALSE, 0);
 
-  GtkWidget *instructLabel = gtk_label_new(
-      "Click vào hình ảnh, sau đó click vào từ tương ứng để ghép cặp");
+  GtkWidget *instructLabel =
+      gtk_label_new("Kéo hình ảnh thả vào từ tương ứng (hoặc click để chọn)");
   gtk_widget_set_margin_bottom(instructLabel, 16);
   gtk_box_pack_start(GTK_BOX(headerBox), instructLabel, FALSE, FALSE, 0);
 
@@ -627,43 +795,104 @@ static void show_picture_match_game(
     std::swap(wordOrder[i], wordOrder[j]);
   }
 
-  // Create image buttons (3 per row)
-  int cols = 3;
+  // Detect game mode based on content
+  bool isPictureMatch = false;
+  if (!pairs.empty()) {
+    std::string sample = pairs[0].second;
+    // Heuristic: if starts with http, /, or is a known image ext
+    if (sample.find("http") == 0 || sample.find("/") == 0 ||
+        sample.find(".png") != std::string::npos ||
+        sample.find(".jpg") != std::string::npos) {
+      isPictureMatch = true;
+    }
+  }
+
+  // Set titles based on mode
+  gtk_frame_set_label(GTK_FRAME(imgFrame),
+                      isPictureMatch ? "Hình ảnh" : "Cột A");
+  gtk_frame_set_label(GTK_FRAME(wordFrame),
+                      isPictureMatch ? "Từ vựng" : "Cột B");
+
+  // Create Left Side Items (Images OR Text)
+  int cols = isPictureMatch ? 3 : 1;
+  GtkTargetEntry targets[] = {{(char *)"text/plain", 0, 0}};
+
   for (size_t i = 0; i < pairs.size(); i++) {
-    const std::string &imageSource = pairs[i].second;
-
-    // Load or create image
-    GdkPixbuf *pixbuf = load_game_image(imageSource, 100, 100);
-
-    // Create image widget
-    GtkWidget *image = gtk_image_new_from_pixbuf(pixbuf);
-    g_object_unref(pixbuf);
-
-    // Create button containing the image
     GtkWidget *btn = gtk_button_new();
-    gtk_container_add(GTK_CONTAINER(btn), image);
-
     GtkStyleContext *ctx = gtk_widget_get_style_context(btn);
-    gtk_style_context_add_class(ctx, "pm-image-btn");
+
+    if (isPictureMatch) {
+      // Image Mode
+      const std::string &imageSource = pairs[i].second;
+      GdkPixbuf *pixbuf = load_game_image(imageSource, 100, 100);
+      GtkWidget *image = gtk_image_new_from_pixbuf(pixbuf);
+      g_object_unref(pixbuf);
+      gtk_container_add(GTK_CONTAINER(btn), image);
+      gtk_style_context_add_class(ctx, "pm-image-btn");
+
+      int row = i / cols;
+      int col = i % cols;
+      gtk_grid_attach(GTK_GRID(imgGrid), btn, col, row, 1, 1);
+    } else {
+      // Text Mode (Word/Sentence Match)
+      // For Word/Sentence match, usually 'first' is Left, 'second' is Right?
+      // Logic in parse_pairs:
+      // Word Match: pairs = (Left, Right)
+      // Picture Match: pairs = (Word, ImageUrl) -> But we use second as Left
+      // here?? Wait, original Picture Match logic:
+      //   pairs[i].second is Image (Left in UI)
+      //   pairs[i].first is Word (Right in UI)
+      //
+      // So for Word Match (Text-Text), we should probably use:
+      //   pairs[i].first as Left
+      //   pairs[i].second as Right
+
+      const std::string &text = pairs[i].first;
+      GtkWidget *lbl = gtk_label_new(text.c_str());
+      gtk_label_set_max_width_chars(GTK_LABEL(lbl), 25);
+      gtk_label_set_line_wrap(GTK_LABEL(lbl), TRUE);
+      gtk_container_add(GTK_CONTAINER(btn), lbl);
+      gtk_style_context_add_class(ctx, "text-match-btn");
+
+      // Add to grid (1 col for text usually better, or 2)
+      // Using grid for consistency
+      int tCols = 1;
+      int row = i / tCols;
+      int col = i % tCols;
+      gtk_grid_attach(GTK_GRID(imgGrid), btn, col, row, 1, 1);
+    }
 
     // Connect click handler
     g_signal_connect(btn, "clicked", G_CALLBACK(on_pm_image_clicked),
                      GINT_TO_POINTER(i));
 
-    // Add to grid
-    int row = i / cols;
-    int col = i % cols;
-    gtk_grid_attach(GTK_GRID(imgGrid), btn, col, row, 1, 1);
+    // Enable Drag Source
+    gtk_drag_source_set(btn, GDK_BUTTON1_MASK, targets, 1, GDK_ACTION_COPY);
+    g_signal_connect(btn, "drag-data-get", G_CALLBACK(on_drag_data_get),
+                     GINT_TO_POINTER(i));
 
     g_pm_state->imageButtons.push_back(btn);
   }
 
-  // Create word buttons (in shuffled order)
+  // Create Right Side Items (Always Text)
   for (size_t i = 0; i < wordOrder.size(); i++) {
     int origIdx = wordOrder[i];
-    const std::string &word = pairs[origIdx].first;
+    std::string text;
 
-    GtkWidget *btn = gtk_button_new_with_label(word.c_str());
+    // Logic: In PictureMatch, pairs[i].first is the Word (Right).
+    // In WordMatch (Left/Right), pairs[i].second is Right.
+    if (isPictureMatch) {
+      text = pairs[origIdx].first;
+    } else {
+      text = pairs[origIdx].second;
+    }
+
+    GtkWidget *btn = gtk_button_new_with_label(text.c_str());
+    GtkWidget *child = gtk_bin_get_child(GTK_BIN(btn));
+    if (GTK_IS_LABEL(child)) {
+      gtk_label_set_max_width_chars(GTK_LABEL(child), 25);
+      gtk_label_set_line_wrap(GTK_LABEL(child), TRUE);
+    }
 
     GtkStyleContext *ctx = gtk_widget_get_style_context(btn);
     gtk_style_context_add_class(ctx, "pm-word-btn");
@@ -673,6 +902,12 @@ static void show_picture_match_game(
 
     // Connect click handler with original index
     g_signal_connect(btn, "clicked", G_CALLBACK(on_pm_word_clicked),
+                     GINT_TO_POINTER(origIdx));
+
+    // --- Enable DRAG DESTINATION ---
+    gtk_drag_dest_set(btn, GTK_DEST_DEFAULT_ALL, targets, 1, GDK_ACTION_COPY);
+    g_signal_connect(btn, "drag-data-received",
+                     G_CALLBACK(on_drag_data_received),
                      GINT_TO_POINTER(origIdx));
 
     gtk_box_pack_start(GTK_BOX(wordBox), btn, FALSE, FALSE, 4);
@@ -689,17 +924,52 @@ static void show_picture_match_game(
   int response = gtk_dialog_run(GTK_DIALOG(dialog));
 
   // Build matches JSON for submission
+  // Build matches JSON for submission
   std::stringstream matchesJson;
   matchesJson << "[";
   bool first = true;
+
+  // Re-detect mode for submission logic
+  // Re-detect mode for submission logic
+  // bool isPictureMatch = false; // Already declared at top of function
+  if (!pairs.empty()) {
+    std::string sample = pairs[0].second;
+    if (sample.find("http") == 0 || sample.find("/") == 0 ||
+        sample.find(".png") != std::string::npos ||
+        sample.find(".jpg") != std::string::npos) {
+      isPictureMatch = true;
+    }
+  }
+
   for (const auto &match : g_pm_state->matches) {
-    int imgIdx = match.first;
-    int wordIdx = match.second;
+    int leftIdx =
+        match.first; // Index of item from Left Column (Image or LeftText)
+    int rightIdx =
+        match.second; // Index of item from Right Column (Word or RightText)
+
     if (!first)
       matchesJson << ",";
     first = false;
-    matchesJson << "{\"word\":\"" << escape_json(pairs[imgIdx].first) << "\","
-                << "\"imageUrl\":\"" << escape_json(pairs[imgIdx].second) << "\"}";
+
+    if (isPictureMatch) {
+      // Picture Match: Server expects "word" and "imageUrl"
+      // In our pairs: first=Word, second=Image
+      // Left Column was Image -> pairs[leftIdx].second
+      // Right Column was Word -> pairs[rightIdx].first
+      matchesJson << "{\"word\":\"" << escape_json(pairs[rightIdx].first)
+                  << "\","
+                  << "\"imageUrl\":\"" << escape_json(pairs[leftIdx].second)
+                  << "\"}";
+    } else {
+      // Word/Sentence Match: Server expects "left" and "right"
+      // In our pairs: first=LeftText, second=RightText
+      // Left Column was LeftText -> pairs[leftIdx].first
+      // Right Column was RightText -> pairs[rightIdx].second
+      matchesJson << "{\"left\":\"" << escape_json(pairs[leftIdx].first)
+                  << "\","
+                  << "\"right\":\"" << escape_json(pairs[rightIdx].second)
+                  << "\"}";
+    }
   }
   matchesJson << "]";
 
@@ -740,11 +1010,11 @@ static void show_picture_match_game(
   grade = pickVal("grade");
   percentage = pickVal("percentage");
 
-  std::string resultMsg = "🎮 KẾT QUẢ GAME\n\nĐiểm: " + score + "/" + maxScore +
-                          " (" + percentage + "%)\nXếp loại: " + grade +
-                          "\n\nSố cặp đã ghép: " +
-                          std::to_string(g_pm_state->matches.size()) + "/" +
-                          std::to_string(g_pm_state->totalPairs);
+  std::string resultMsg =
+      "🎮 KẾT QUẢ GAME\n\nĐiểm: " + score + "/" + maxScore + " (" + percentage +
+      "%)\nXếp loại: " + grade +
+      "\n\nSố cặp đã ghép: " + std::to_string(g_pm_state->matches.size()) +
+      "/" + std::to_string(g_pm_state->totalPairs);
 
   GtkWidget *resultDialog = gtk_message_dialog_new(
       GTK_WINDOW(window), GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
@@ -1503,10 +1773,11 @@ static gboolean refresh_conversation_messages(gpointer data) {
     return FALSE; // Stop if window closed
 
   // Fetch chat history again
-  std::string req = std::string("{\"messageType\":\"GET_CHAT_HISTORY_REQUEST\", "
-                                "\"sessionToken\":\"") +
-                    sessionToken + "\", \"payload\":{\"recipientId\":\"" +
-                    g_conv_state->recipientId + "\"}}";
+  std::string req =
+      std::string("{\"messageType\":\"GET_CHAT_HISTORY_REQUEST\", "
+                  "\"sessionToken\":\"") +
+      sessionToken + "\", \"payload\":{\"recipientId\":\"" +
+      g_conv_state->recipientId + "\"}}";
   if (!sendMessage(req))
     return TRUE; // Keep trying
 
@@ -1568,9 +1839,8 @@ static gboolean refresh_conversation_messages(gpointer data) {
     gtk_widget_show_all(g_conv_state->box_msgs);
 
     // Scroll to bottom
-    GtkAdjustment *adj =
-        gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(
-            gtk_widget_get_parent(g_conv_state->box_msgs)));
+    GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(
+        GTK_SCROLLED_WINDOW(gtk_widget_get_parent(g_conv_state->box_msgs)));
     gtk_adjustment_set_value(adj, gtk_adjustment_get_upper(adj));
   }
 
@@ -1752,7 +2022,8 @@ static void on_open_conversation_clicked(GtkWidget * /*widget*/,
   g_conv_state->recipientLabel = recipientLabel;
   g_conv_state->messageCount = (int)msgs.size();
   // Start auto-refresh every 3 seconds (3000 ms)
-  g_conv_state->timeout_id = g_timeout_add(3000, refresh_conversation_messages, NULL);
+  g_conv_state->timeout_id =
+      g_timeout_add(3000, refresh_conversation_messages, NULL);
 
   gtk_widget_show_all(conv);
   gtk_dialog_run(GTK_DIALOG(conv));
@@ -1903,130 +2174,33 @@ void show_game_dialog() {
   std::string timeLimit = val("timeLimit");
   std::string gameData = startResp; // reuse whole payload for pair parsing
 
-  // Special handling for picture_match: use visual image dialog
+  // ALL matching games now use the same UI (Picture, Word, Sentence)
   if (gameType == "picture_match") {
     auto pairs = parse_pairs(gameData, "word", "imageUrl");
     show_picture_match_game(gameTitle, gameSessionId, gameId, timeLimit, pairs);
-    return;
-  }
+  } else if (gameType == "word_match") {
+    auto pairs = parse_pairs(gameData, "left", "right");
+    // Use the same function but careful about image vs text.
+    // We will overload show_picture_match_game or modify it to handle
+    // text-only. For now, let's call the same function but we need to update it
+    // to support text-only mode next. Passing "TEXT_MODE" marker?? No, better
+    // to update the function signature or logic. Let's pass the pairs and rely
+    // on the function to detect if "right" is an image URL or text? Actually
+    // word_match is Text(Left) - Text(Right). picture_match is Text(Word) -
+    // Image(Url).
 
-  // 4) Giao diện chơi game (for word_match and sentence_match)
-  GtkWidget *play = gtk_dialog_new_with_buttons(
-      gameTitle.c_str(), GTK_WINDOW(window), GTK_DIALOG_MODAL, "Hủy",
-      GTK_RESPONSE_CLOSE, "Nộp", GTK_RESPONSE_OK, NULL);
-  gtk_window_set_default_size(GTK_WINDOW(play), 520, 480);
-  GtkWidget *pa = gtk_dialog_get_content_area(GTK_DIALOG(play));
-  GtkWidget *info = gtk_label_new(
-      ("Thời gian: " + timeLimit + "s | Loại: " + gameType).c_str());
-  gtk_box_pack_start(GTK_BOX(pa), info, FALSE, FALSE, 6);
-
-  GtkWidget *textArea = gtk_text_view_new();
-  gtk_text_view_set_editable(GTK_TEXT_VIEW(textArea), FALSE);
-  gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(textArea), GTK_WRAP_WORD_CHAR);
-  GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
-  gtk_widget_set_size_request(scroll, -1, 260);
-  gtk_container_add(GTK_CONTAINER(scroll), textArea);
-  gtk_box_pack_start(GTK_BOX(pa), scroll, TRUE, TRUE, 6);
-
-  GtkWidget *lblGuide =
-      gtk_label_new("Nhập ghép cặp theo định dạng 1-3,2-1 ...");
-  gtk_box_pack_start(GTK_BOX(pa), lblGuide, FALSE, FALSE, 4);
-  GtkWidget *entryMatches = gtk_entry_new();
-  gtk_box_pack_start(GTK_BOX(pa), entryMatches, FALSE, FALSE, 4);
-
-  // Build content per type
-  std::stringstream display;
-  std::vector<std::pair<std::string, std::string>> pairs;
-  if (gameType == "word_match") {
-    pairs = parse_pairs(gameData, "left", "right");
-    display << "Cột trái (English) vs cột phải (Vietnamese):\n\n";
-    for (size_t i = 0; i < pairs.size(); ++i) {
-      display << (i + 1) << ". " << pairs[i].first << "    |    "
-              << pairs[i].second << "\n";
-    }
+    // We'll update show_picture_match_game to handle this.
+    show_picture_match_game(gameTitle, gameSessionId, gameId, timeLimit, pairs);
   } else if (gameType == "sentence_match") {
-    pairs = parse_pairs(gameData, "left", "right");
-    display << "Ghép câu hỏi với trả lời:\n\n";
-    display << "Câu hỏi:\n";
-    for (size_t i = 0; i < pairs.size(); ++i)
-      display << "  " << (i + 1) << ") " << pairs[i].first << "\n";
-    display << "\nCâu trả lời:\n";
-    for (size_t i = 0; i < pairs.size(); ++i)
-      display << "  " << (i + 1) << ") " << pairs[i].second << "\n";
+    auto pairs = parse_pairs(gameData, "left", "right");
+    show_picture_match_game(gameTitle, gameSessionId, gameId, timeLimit, pairs);
   } else {
-    // picture_match is handled separately with visual image dialog
-    display << "Loại game chưa hỗ trợ.";
+    GtkWidget *info = gtk_message_dialog_new(
+        NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+        "Loại game '%s' chưa được hỗ trợ giao diện mới.", gameType.c_str());
+    gtk_dialog_run(GTK_DIALOG(info));
+    gtk_widget_destroy(info);
   }
-
-  GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(textArea));
-  gtk_text_buffer_set_text(buf, display.str().c_str(), -1);
-
-  gtk_widget_show_all(play);
-  int presp = gtk_dialog_run(GTK_DIALOG(play));
-  if (presp != GTK_RESPONSE_OK) {
-    gtk_widget_destroy(play);
-    return;
-  }
-
-  const char *matchStr = gtk_entry_get_text(GTK_ENTRY(entryMatches));
-  std::string matchesInput = matchStr ? matchStr : "";
-
-  // Build matches JSON
-  std::stringstream matchesJson;
-  matchesJson << "[";
-  std::istringstream iss(matchesInput);
-  std::string token;
-  bool first = true;
-  while (std::getline(iss, token, ',')) {
-    size_t dash = token.find('-');
-    if (dash == std::string::npos)
-      continue;
-    int li = std::max(0, std::stoi(token.substr(0, dash)) - 1);
-    int ri = std::max(0, std::stoi(token.substr(dash + 1)) - 1);
-    if (li < (int)pairs.size() && ri < (int)pairs.size()) {
-      if (!first)
-        matchesJson << ",";
-      first = false;
-      // word_match and sentence_match use "left"/"right" keys
-      matchesJson << "{\"left\":\"" << escape_json(pairs[li].first) << "\","
-                  << "\"right\":\"" << escape_json(pairs[ri].second) << "\"}";
-    }
-  }
-  matchesJson << "]";
-
-  gtk_widget_destroy(play);
-
-  // 5) Submit result
-  std::string submitReq = "{\"messageType\":\"SUBMIT_GAME_RESULT_REQUEST\","
-                          " \"sessionToken\":\"" +
-                          sessionToken +
-                          "\", \"payload\":{\"gameSessionId\":\"" +
-                          gameSessionId + "\",\"gameId\":\"" + gameId +
-                          "\",\"matches\":" + matchesJson.str() + "}}";
-  if (!sendMessage(submitReq))
-    return;
-  std::string submitResp = waitForResponse(4000);
-
-  std::string score = "?", maxScore = "?", grade = "?", percentage = "?";
-  auto pickVal = [&](const std::string &key) {
-    std::regex r("\\\"" + key + "\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-    std::smatch m;
-    if (std::regex_search(submitResp, m, r) && m.size() > 1)
-      return m.str(1);
-    return std::string("?");
-  };
-  score = pickVal("score");
-  maxScore = pickVal("maxScore");
-  grade = pickVal("grade");
-  percentage = pickVal("percentage");
-
-  std::string resultMsg = "Điểm: " + score + "/" + maxScore + " (" +
-                          percentage + "%)\nXếp loại: " + grade;
-  GtkWidget *res =
-      gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO,
-                             GTK_BUTTONS_OK, "%s", resultMsg.c_str());
-  gtk_dialog_run(GTK_DIALOG(res));
-  gtk_widget_destroy(res);
 }
 
 static void on_level_item_clicked(GtkWidget *widget, gpointer data) {
@@ -2085,80 +2259,69 @@ void show_level_dialog() {
 // =========================================================
 
 static void on_voice_call_button_clicked(GtkWidget *widget, gpointer data) {
-  std::string *receiverId = static_cast<std::string *>(data);
-  if (!receiverId || receiverId->empty()) {
+  std::string *receiverIdPtr = (std::string *)data;
+  std::string receiverId = *receiverIdPtr;
+  std::cout << "[GUI] Initiating voice call to " << receiverId << "..."
+            << std::endl;
+
+  // 1. Init UDP port
+  int udpPort = g_audio_streamer.init();
+  if (udpPort < 0) {
     GtkWidget *error =
         gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
-                               GTK_BUTTONS_OK, "Invalid contact selected");
+                               GTK_BUTTONS_OK, "Failed to init UDP port");
     gtk_dialog_run(GTK_DIALOG(error));
     gtk_widget_destroy(error);
     return;
   }
 
-  // Initiate call
-  std::string callReq =
-      "{\"messageType\":\"VOICE_CALL_INITIATE_REQUEST\", \"sessionToken\":\"" +
-      sessionToken + "\", \"payload\":{\"receiverId\":\"" + *receiverId +
-      "\", \"audioSource\":\"microphone\"}}";
+  // 2. Send Call Initiate
+  std::string req = "{\"messageType\":\"VOICE_CALL_INITIATE_REQUEST\","
+                    " \"sessionToken\":\"" +
+                    sessionToken + "\", \"payload\":{\"receiverId\":\"" +
+                    receiverId +
+                    "\", \"audioSource\":\"microphone\", \"udpPort\":" +
+                    std::to_string(udpPort) + "}}";
 
-  GtkWidget *calling =
-      gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO,
-                             GTK_BUTTONS_CANCEL, "Calling... Please wait");
-  gtk_widget_show_now(calling);
-  while (gtk_events_pending())
-    gtk_main_iteration();
+  if (sendMessage(req)) {
+    pendingCallId = "pending_" + receiverId; // Temp pending ID
+    pendingCallUdpPort = 0;                  // Reset
+    inCallMode = false;
 
-  if (!sendMessage(callReq)) {
-    gtk_widget_destroy(calling);
-    GtkWidget *error =
-        gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
-                               GTK_BUTTONS_OK, "Failed to initiate call");
-    gtk_dialog_run(GTK_DIALOG(error));
-    gtk_widget_destroy(error);
-    return;
-  }
+    activeCallUdpPort = 0;
 
-  std::string response = waitForResponse(5000);
-  gtk_widget_destroy(calling);
+    // Show "Calling..." Dialog
+    outgoingCallDialog = gtk_dialog_new_with_buttons(
+        "Calling...", GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT,
+        "Cancel", GTK_RESPONSE_CANCEL, NULL);
 
-  if (response.find("\"status\":\"success\"") != std::string::npos) {
-    // Extract call ID
-    size_t idStart = response.find("\"callId\":\"");
-    std::string callId = "";
-    if (idStart != std::string::npos) {
-      idStart += 10;
-      size_t idEnd = response.find("\"", idStart);
-      callId = response.substr(idStart, idEnd - idStart);
+    GtkWidget *content_area =
+        gtk_dialog_get_content_area(GTK_DIALOG(outgoingCallDialog));
+    GtkWidget *spinner = gtk_spinner_new();
+    gtk_spinner_start(GTK_SPINNER(spinner));
+    gtk_container_add(GTK_CONTAINER(content_area), spinner);
+
+    GtkWidget *label = gtk_label_new(("Calling user..."));
+    gtk_container_add(GTK_CONTAINER(content_area), label);
+    gtk_widget_show_all(outgoingCallDialog);
+
+    int result = gtk_dialog_run(GTK_DIALOG(outgoingCallDialog));
+
+    if (result == GTK_RESPONSE_CANCEL || result == GTK_RESPONSE_DELETE_EVENT) {
+      if (!inCallMode) {
+        std::cout << "[GUI] Call Cancelled by User." << std::endl;
+        g_audio_streamer.stop();
+      }
     }
 
-    GtkWidget *callDialog = gtk_message_dialog_new(
-        NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_CLOSE,
-        "Call initiated!\n\nCall ID: %s\n\n"
-        "(Simulated voice call - no actual audio)\n"
-        "Click Close to end the call.",
-        callId.c_str());
-    gtk_dialog_run(GTK_DIALOG(callDialog));
-    gtk_widget_destroy(callDialog);
-
-    // End call
-    if (!callId.empty()) {
-      std::string endReq =
-          "{\"messageType\":\"VOICE_CALL_END_REQUEST\", \"sessionToken\":\"" +
-          sessionToken + "\", \"payload\":{\"callId\":\"" + callId + "\"}}";
-      sendMessage(endReq);
-      waitForResponse(2000);
+    if (outgoingCallDialog) {
+      gtk_widget_destroy(outgoingCallDialog);
+      outgoingCallDialog = nullptr;
     }
   } else {
-    std::string errorMsg = "Failed to start call";
-    size_t msgStart = response.find("\"message\":\"");
-    if (msgStart != std::string::npos) {
-      msgStart += 11;
-      size_t msgEnd = response.find("\"", msgStart);
-      errorMsg = response.substr(msgStart, msgEnd - msgStart);
-    }
-    GtkWidget *error = gtk_message_dialog_new(
-        NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "%s",
-        errorMsg.c_str());
+    GtkWidget *error =
+        gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+                               GTK_BUTTONS_OK, "Failed to send call request");
     gtk_dialog_run(GTK_DIALOG(error));
     gtk_widget_destroy(error);
   }
@@ -2194,7 +2357,8 @@ void show_feedback_dialog() {
   std::string response = waitForResponse(5000);
   gtk_widget_destroy(loading);
 
-  if (response.empty() || response.find("\"status\":\"success\"") == std::string::npos) {
+  if (response.empty() ||
+      response.find("\"status\":\"success\"") == std::string::npos) {
     GtkWidget *error =
         gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
                                GTK_BUTTONS_OK, "Không thể tải phản hồi");
@@ -2205,8 +2369,8 @@ void show_feedback_dialog() {
 
   // Create feedback dialog
   GtkWidget *dialog = gtk_dialog_new_with_buttons(
-      "Xem phản hồi từ giáo viên", GTK_WINDOW(window), GTK_DIALOG_MODAL,
-      "Đóng", GTK_RESPONSE_CLOSE, NULL);
+      "Xem phản hồi từ giáo viên", GTK_WINDOW(window), GTK_DIALOG_MODAL, "Đóng",
+      GTK_RESPONSE_CLOSE, NULL);
   gtk_window_set_default_size(GTK_WINDOW(dialog), 600, 500);
 
   GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
@@ -2245,7 +2409,8 @@ void show_feedback_dialog() {
 
     for (size_t i = 0; i < submissionsStr.length(); i++) {
       if (submissionsStr[i] == '{') {
-        if (braceCount == 0) objStart = i;
+        if (braceCount == 0)
+          objStart = i;
         braceCount++;
       } else if (submissionsStr[i] == '}') {
         braceCount--;
@@ -2292,7 +2457,8 @@ void show_feedback_dialog() {
           gtk_container_add(GTK_CONTAINER(frame), frameBox);
 
           // Exercise title
-          std::string titleMarkup = "<b>" + exerciseTitle + "</b> (" + exerciseType + ")";
+          std::string titleMarkup =
+              "<b>" + exerciseTitle + "</b> (" + exerciseType + ")";
           GtkWidget *lblTitle = gtk_label_new(NULL);
           gtk_label_set_markup(GTK_LABEL(lblTitle), titleMarkup.c_str());
           gtk_widget_set_halign(lblTitle, GTK_ALIGN_START);
@@ -2304,9 +2470,11 @@ void show_feedback_dialog() {
             totalScore += score;
 
             // Score with color
-            std::string scoreColor = score >= 80 ? "green" : (score >= 50 ? "orange" : "red");
-            std::string scoreMarkup = "<span foreground='" + scoreColor + "'><b>Điểm: " +
-                                      std::to_string(score) + "/100</b></span>";
+            std::string scoreColor =
+                score >= 80 ? "green" : (score >= 50 ? "orange" : "red");
+            std::string scoreMarkup = "<span foreground='" + scoreColor +
+                                      "'><b>Điểm: " + std::to_string(score) +
+                                      "/100</b></span>";
             GtkWidget *lblScore = gtk_label_new(NULL);
             gtk_label_set_markup(GTK_LABEL(lblScore), scoreMarkup.c_str());
             gtk_widget_set_halign(lblScore, GTK_ALIGN_START);
@@ -2321,9 +2489,11 @@ void show_feedback_dialog() {
 
             // Feedback
             GtkWidget *lblFeedbackTitle = gtk_label_new(NULL);
-            gtk_label_set_markup(GTK_LABEL(lblFeedbackTitle), "<b>Nhận xét:</b>");
+            gtk_label_set_markup(GTK_LABEL(lblFeedbackTitle),
+                                 "<b>Nhận xét:</b>");
             gtk_widget_set_halign(lblFeedbackTitle, GTK_ALIGN_START);
-            gtk_box_pack_start(GTK_BOX(frameBox), lblFeedbackTitle, FALSE, FALSE, 0);
+            gtk_box_pack_start(GTK_BOX(frameBox), lblFeedbackTitle, FALSE,
+                               FALSE, 0);
 
             GtkWidget *lblFeedback = gtk_label_new(feedback.c_str());
             gtk_label_set_line_wrap(GTK_LABEL(lblFeedback), TRUE);
@@ -2334,7 +2504,8 @@ void show_feedback_dialog() {
             // Pending status
             GtkWidget *lblPending = gtk_label_new(NULL);
             gtk_label_set_markup(GTK_LABEL(lblPending),
-                                 "<span foreground='orange'><b>Đang chờ giáo viên chấm điểm...</b></span>");
+                                 "<span foreground='orange'><b>Đang chờ giáo "
+                                 "viên chấm điểm...</b></span>");
             gtk_widget_set_halign(lblPending, GTK_ALIGN_START);
             gtk_box_pack_start(GTK_BOX(frameBox), lblPending, FALSE, FALSE, 0);
           }
@@ -2357,7 +2528,8 @@ void show_feedback_dialog() {
   std::string summaryMarkup = "<b>Tổng kết:</b>\n";
   summaryMarkup += "Tổng số bài nộp: " + std::to_string(submissionCount) + "\n";
   summaryMarkup += "Đã chấm điểm: " + std::to_string(reviewedCount) + "\n";
-  summaryMarkup += "Đang chờ: " + std::to_string(submissionCount - reviewedCount);
+  summaryMarkup +=
+      "Đang chờ: " + std::to_string(submissionCount - reviewedCount);
   if (reviewedCount > 0) {
     double avgScore = static_cast<double>(totalScore) / reviewedCount;
     char avgBuf[16];
@@ -2429,6 +2601,7 @@ void show_voice_call_dialog() {
         size_t nameEnd = response.find("\"", nameStart + 1);
         std::string name =
             response.substr(nameStart + 1, nameEnd - nameStart - 1);
+
         onlineContacts.push_back({userId, name});
       }
     }
@@ -2510,6 +2683,123 @@ void on_menu_btn_clicked(GtkWidget *widget, gpointer data) {
   }
 }
 
+// Callback for accepting incoming call
+static void on_incoming_call_accept(GtkWidget *widget, gpointer data) {
+  // Init our UDP port
+  int udpPort = g_audio_streamer.init();
+  if (udpPort < 0) {
+    std::cerr << "[GUI] Failed to init UDP port" << std::endl;
+  }
+
+  std::string req = "{\"messageType\":\"VOICE_CALL_ACCEPT_REQUEST\","
+                    " \"sessionToken\":\"" +
+                    sessionToken + "\", \"payload\":{\"callId\":\"" +
+                    pendingCallId +
+                    "\",\"udpPort\":" + std::to_string(udpPort) + "}}";
+
+  if (sendMessage(req)) {
+    if (pendingCallUdpPort > 0) {
+      std::cout << "[GUI] Accepting Call. Caller Port: " << pendingCallUdpPort
+                << std::endl;
+      g_audio_streamer.startStreaming("127.0.0.1", pendingCallUdpPort);
+    } else {
+      std::cout << "[GUI] Warning: Caller UDP port not found." << std::endl;
+    }
+
+    inCallMode = true;
+    activeCallId = pendingCallId;
+    activeCallUdpPort = pendingCallUdpPort;
+  }
+}
+
+// Callback for rejecting incoming call
+static void on_incoming_call_reject(GtkWidget *widget, gpointer data) {
+  std::string req = "{\"messageType\":\"VOICE_CALL_REJECT_REQUEST\","
+                    " \"sessionToken\":\"" +
+                    sessionToken + "\", \"payload\":{\"callId\":\"" +
+                    pendingCallId + "\"}}";
+  sendMessage(req);
+  hasIncomingCall = false;
+}
+
+// Polling function for voice call events
+static gboolean check_voice_call_status(gpointer data) {
+  // 1. Check for incoming call
+  if (hasIncomingCall) {
+    hasIncomingCall = false; // Reset flag
+
+    // Show custom Incoming Call Dialog
+    incomingCallDialog = gtk_dialog_new_with_buttons(
+        "Incoming Call", GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT,
+        "Reject", GTK_RESPONSE_REJECT, "Accept", GTK_RESPONSE_ACCEPT, NULL);
+
+    std::string labelText = "Incoming call from " + pendingCallerName +
+                            "\nUser ID: " + pendingCallerId;
+    GtkWidget *content_area =
+        gtk_dialog_get_content_area(GTK_DIALOG(incomingCallDialog));
+    GtkWidget *label = gtk_label_new(labelText.c_str());
+    // Make text bigger/bold
+    gtk_label_set_markup(
+        GTK_LABEL(label),
+        ("<span font='14'><b>" + labelText + "</b></span>").c_str());
+    gtk_container_add(GTK_CONTAINER(content_area), label);
+    gtk_widget_show_all(incomingCallDialog);
+
+    // Run non-blocking? No, we need a response. But running blocking here
+    // freezes the poll loop? Actually, we can just show it and connect signals,
+    // OR run distinct loop. Let's use run() but ensure we check streaming state
+    // if we accepted? For polling consistency, let's use run(). It starts a
+    // recursive main loop, so g_timeout_add continues? Yes, recursive main loop
+    // handles events.
+
+    gint result = gtk_dialog_run(GTK_DIALOG(incomingCallDialog));
+    gtk_widget_destroy(incomingCallDialog);
+    incomingCallDialog = nullptr;
+
+    if (result == GTK_RESPONSE_ACCEPT) {
+      on_incoming_call_accept(NULL, NULL);
+    } else {
+      on_incoming_call_reject(NULL, NULL);
+    }
+  }
+
+  // 2. Check if we need to start streaming (Caller side)
+  // When we call someone, we wait for ACCEPT. When accepted, client.cpp sets
+  // inCallMode=true and activeCallUdpPort set.
+  static bool wasInCall = false;
+  if (inCallMode && !wasInCall) {
+    // Just transitioned to Call Mode
+    // If we have an outgoing dialog open, close it!
+    if (outgoingCallDialog != nullptr) {
+      // Signal the dialog to close (e.g. response OK) or destroy it
+      gtk_window_close(GTK_WINDOW(outgoingCallDialog));
+      // Note: gtk_dialog_run returns below
+    }
+
+    // Start streaming to Caller using the port parsed by client.cpp
+    if (pendingCallUdpPort > 0) {
+      std::cout << "[GUI] Accepting Call. Caller Port: " << pendingCallUdpPort
+                << std::endl;
+      // For MVP, assume localhost. In real world, we'd need Caller IP.
+      g_audio_streamer.startStreaming("127.0.0.1", pendingCallUdpPort);
+    } else if (activeCallUdpPort > 0) {
+      // We are the caller, and receiver accepted.
+      std::cout << "[GUI] Call Connected. Receiver Port: " << activeCallUdpPort
+                << std::endl;
+      g_audio_streamer.startStreaming("127.0.0.1", activeCallUdpPort);
+    } else {
+      std::cout << "[GUI] Warning: UDP port not found." << std::endl;
+    }
+  } else if (!inCallMode && wasInCall) {
+    // Call ended
+    g_audio_streamer.stop();
+    // Maybe show alert?
+  }
+  wasInCall = inCallMode;
+
+  return TRUE; // Keep polling
+}
+
 void show_main_menu() {
   if (vbox_login != NULL) {
     gtk_widget_destroy(vbox_login);
@@ -2525,8 +2815,8 @@ void show_main_menu() {
       "<span size='x-large' weight='bold'>English Learning App</span>");
   gtk_box_pack_start(GTK_BOX(vbox_menu), lbl, FALSE, FALSE, 10);
 
-  const char *buttons[] = {"1. Chọn cấp độ", "2. Học bài", "3. Làm bài thi",
-                           "4. Chat",        "5. Game",    "6. Voice Call",
+  const char *buttons[] = {"1. Chọn cấp độ",  "2. Học bài", "3. Làm bài thi",
+                           "4. Chat",         "5. Game",    "6. Voice Call",
                            "7. Xem phản hồi", "Thoát"};
   for (int i = 0; i < 8; i++) {
     GtkWidget *btn = gtk_button_new_with_label(buttons[i]);
@@ -2535,6 +2825,9 @@ void show_main_menu() {
     gtk_box_pack_start(GTK_BOX(vbox_menu), btn, FALSE, FALSE, 5);
   }
   gtk_widget_show_all(window);
+
+  // Start polling for voice call events
+  g_timeout_add(200, check_voice_call_status, NULL);
 }
 
 static void on_login_clicked(GtkWidget *widget, gpointer data) {
